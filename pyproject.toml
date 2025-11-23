@@ -1,0 +1,35 @@
+[project]
+name = "cement-imbalance"
+version = "0.1.0"
+description = "Application of deep learning methodology (conditional normalizing flows applied to variational autoencoders) to explore and treat data imbalance of cement type categorization. This is part of a TFG (Treball Fi de Grau) project."
+authors = [{ name = "Noel Pedrosa", email = "noel.pedrosa@molins.es" }]
+license = { text = "Molins, S.A." }
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+
+[tool.poetry]
+# instala también tu propio paquete (no solo dependencias)
+package-mode = true
+packages = [{ include = "cement_imbalance" }]
+
+[tool.poetry.dependencies]
+statsmodels = ">=0.14.5,<0.15.0"
+jupyter = ">=1.1.1,<2.0.0"
+plotly = ">=6.2.0,<7.0.0"
+seaborn = ">=0.13.2,<0.14.0"
+matplotlib = ">=3.8,<3.10"
+black = ">=25.1.0,<26.0.0"
+numba = "^0.60"
+scipy = ">=1.16.0,<2.0.0"
+tqdm = ">=4.67.1,<5.0.0"
+umap-learn = "==0.5.3"
+nflows = "^0.14"
+torch = "2.7.1"
+#torchvision = "0.22.0"
+#torchaudio = "2.7.1"
+from-root = "^1.3.0"
+optuna = "^4.5.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

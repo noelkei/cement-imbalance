@@ -1,0 +1,107 @@
+encoder:
+  latent_dim: 64          # sweep overrides: {56,64,72}
+  embedding_dim: 8
+  hidden_features: 128
+  num_layers: 3
+  dropout: 0.05
+
+decoder:
+  embedding_dim: 8
+  hidden_features: 128
+  num_layers: 2
+  dropout: 0.05
+  use_variance_head: true
+
+flow:
+  active: true
+  use_actnorm: true
+  use_learnable_permutations: true
+  num_bins: 10
+  tail_bound: 3.0
+  initial_affine_layers: 2
+  affine_rq_ratio: [1, 6]
+  n_repeat_blocks: 4
+  final_rq_layers: 2
+  lulinear_finisher: true
+  embedding_dim: 8
+  hidden_features: 128
+  num_layers: 2
+
+training:
+  batch_size: 80          # sweep overrides: {64,80,96}
+  learning_rate: 0.0012
+  num_epochs: 300
+  early_stopping_patience: 45
+  lr_decay_patience: 12
+  lr_decay_factor: 0.5
+  min_improvement: 0.015
+  min_improvement_floor: 0.003
+  lr_patience_factor: 0.8
+  max_grad_norm: 0
+  weight_decay: 0.0
+
+  save_states: false
+  log_training: false
+  save_results: true
+  save_model: false
+
+  schedules:
+    enable_mse_warmup: true
+    mse_warmup_epochs: 8      # sweep overrides: {0,8,24}
+
+    enable_flow_freeze: false
+    flow_freeze_epochs: 0
+
+    enable_kl_anneal: true
+    kl_start_epoch: 1
+    kl_end_epoch: 300         # explorers override to 360
+
+    enable_sample_posterior_after_warmup: true
+    enable_dec_logstd_tighten: false
+    reset_scheduler_on_nll_start: false
+    reset_scheduler_on_unfreeze: false
+    intercept_early_stop_during_warmup: true
+    reset_phase_baseline_on_nll_start: false
+
+loss:
+  # — reconstruction / KL —
+  use_recon_nll: true
+  recon_weight: 1.0
+
+  use_kl: true
+  kl_weight: 0.15
+  free_bits_per_dim: 0.015
+
+  sample_posterior: false  # trainer flips to True after warmup
+
+  clamp_dec_logstd_range: [-4.0, 2.0]
+  clamp_enc_logstd_range: [-6.0, 6.0]
+  return_recon_tensor: false
+
+  enable_dec_logstd_reg: true
+  dec_logstd_target: -1.0
+  dec_logstd_reg_weight: 0.12
+  dec_logstd_reg_until_epoch: 150
+
+  # — realism knobs (default OFF; sweeps override) —
+  enable_realism: false
+  realism_mode: prior        # prior | recon | both
+  realism_weight_mmd: 0.0
+  realism_weight_corr: 0.0
+  realism_weight_mom: 0.0
+  realism_sigma: null        # None ⇒ median heuristic
+  realism_subsample: 512
+  realism_ramp_start: 0
+  realism_ramp_end: 0
+  realism_use_per_class: true
+  realism_use_mean: true
+  realism_use_std: true
+
+interpretability:
+  save_influence: false
+  influence_step_fraction: 0.01
+  sweep_range: [-3.0, 3.0]
+
+
+
+

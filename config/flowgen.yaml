@@ -1,0 +1,173 @@
+model:
+  embedding_dim: 12
+  hidden_features: 192
+  num_layers: 3
+  use_actnorm: true
+  use_learnable_permutations: true
+  initial_affine_layers: 2
+  affine_rq_ratio: [1, 5]
+  n_repeat_blocks: 4
+  final_rq_layers: 5
+  lulinear_finisher: true
+  num_bins: 16
+  tail_bound: 3.0
+
+training:
+  # --- runtime ---
+  batch_size: 256
+  learning_rate: 0.0001
+  num_epochs: 3
+  finetune_num_epochs: 150
+  early_stopping_patience: 20
+  lr_decay_patience: 10
+  lr_decay_factor: 0.5
+  min_improvement: 0.05
+  min_improvement_floor: 0.0025
+  lr_patience_factor: 0.8
+
+  save_states: true
+  log_training: true
+  save_results: true
+  save_model: true
+
+  # === reference data (for realism) ===
+  use_full_ref: false
+  ref_min: 100
+  syn_min: 100
+  class_weighting: "uniform"
+  min_per_class: 1
+
+  # === base flow terms (joint) ===
+  use_nll: true
+  nll_weight: 1.0
+
+  use_logdet_penalty: false
+  logdet_penalty_weight: 0.0
+  use_logdet_sq: true
+  use_logdet_abs: true
+  clamp_logabsdet_range: null
+
+  use_logpz_centering: false
+  logpz_centering_weight: 0.0
+  logpz_target: null
+
+  # === latent mean penalty ===
+  use_latent_mean_penalty: false
+  latent_mean_weight: 2.5
+  use_latent_mean_sq: true
+  use_latent_mean_abs: true
+
+  # === latent std penalty ===
+  use_latent_std_penalty: false
+  latent_std_weight: 1.25
+  use_latent_std_sq: true
+  use_latent_std_abs: true
+
+  # === latent skew penalty ===
+  use_latent_skew_penalty: false
+  latent_skew_weight: 0.004
+  use_latent_skew_sq: true
+  use_latent_skew_abs: true
+
+  # === latent kurtosis penalty ===
+  use_latent_kurtosis_penalty: false
+  latent_kurtosis_weight: 0.0002
+  use_latent_kurtosis_sq: true
+  use_latent_kurtosis_abs: true
+
+  use_mmd_as_ratio: false
+  mmd_ratio_eps: 1.0e-6
+  mmd_ratio_mode: "sq"
+
+  # === realism XY (joint X↔y) ===
+  use_mmd_xy: false           # variants toggle this on
+  mmd_xy_weight: 0.05
+  mmd_xy_norm: "iqr"
+  mmd_xy_scales: [0.5, 1.0, 2.0]
+
+  use_corr_xy_pearson: false
+  corr_xy_pearson_weight: 0.0
+
+  use_corr_xy_spearman: false
+  corr_xy_spearman_weight: 0.0
+  corr_xy_tau: 0.05
+
+  corr_xy_use_relative: true
+
+  # === realism X side ===
+  use_mmd_x: true
+  mmd_x_weight: 0.48
+
+  use_corr_pearson_x: false
+  corr_pearson_x_weight: 0.0
+  corr_pearson_use_relative_x: true
+
+  use_corr_spearman_x: false
+  corr_spearman_x_weight: 0.0
+  corr_spearman_use_relative_x: true
+
+  use_ks_x: false
+  ks_x_weight: 0.0
+
+  use_w1_x: true
+  w1_x_weight: 700.0
+  w1_x_norm: "iqr"
+
+  ks_grid_points_x: 32
+  ks_tau_x: 0.05
+
+  # === realism Y side ===
+  use_mmd_y: true
+  mmd_y_weight: 1.25
+
+  use_corr_pearson_y: false
+  corr_pearson_y_weight: 0.0
+  corr_pearson_use_relative_y: true
+
+  use_corr_spearman_y: false
+  corr_spearman_y_weight: 0.0
+  corr_spearman_use_relative_y: true
+
+  use_ks_y: false              # default off; variants flip on
+  ks_y_weight: 0.01            # ← ky default per your note
+  ks_grid_points_y: 64
+  ks_tau_y: 0.04               # ← tau default per your note
+
+  use_w1_y: true
+  w1_y_weight: 70.0
+  w1_y_norm: "iqr"
+
+  # === overall (X|y concatenated) eval overrides ===
+  ks_grid_points_all: 64
+  ks_tau_all: 0.05
+  w1_norm_all: "iqr"
+
+  # === realism scheduling / striding ===
+  realism_stride_batches: 1
+  realism_stride_epochs: 1
+  realism_scale_mode: "keep_mean"
+  realism_warmup_epochs: 0
+  realism_ramp_epochs: 0
+
+  realism_bootstrap: 100
+  realism_rvr_bootstrap: 100
+  realism_seed_offset: 0
+
+  enforce_realism: true
+
+  w1_x_softclip_s: 1.25
+  w1_y_softclip_s: 1.25
+  w1_x_clip_perdim: 2.0
+  w1_y_clip_perdim: 2.0
+  realism_z_trunc: 3.0
+  w1_x_agg_softcap: 2.0
+  w1_y_agg_softcap: 2.0
+
+  seed: 2887
+
+interpretability:
+  save_influence: true
+  influence_step_fraction: 0.005
+  sweep_range: [-3.0, 3.0]
+
+seed: 2887

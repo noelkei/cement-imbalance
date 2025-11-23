@@ -1,0 +1,62 @@
+model:
+  # ---- architecture ----
+  embedding_dim: 12
+  hidden_dim: 128
+  num_layers: 3
+  activation: "relu"
+  dropout: 0.0
+  batchnorm: false
+  use_weight_norm: true
+  residual: true
+  final_activation: null         # or "sigmoid"/"tanh"
+  task: "regression"             # or "classification"
+  context_mode: "embed"
+
+  # optional metadata (dataloader convenience)
+  target_names: ["init"]         # replace with your real target col(s) or remove
+
+training:
+  # --- optimizer ---
+  optimizer: "adam"              # or "adamw"
+  weight_decay: 0.0              # >0 typically for AdamW
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+  # --- runtime ---
+  batch_size: 256
+  learning_rate: 0.0001
+  num_epochs: 3
+
+  # --- early stopping ---
+  early_stopping_patience: 20
+  early_stop_min_delta: 0.0      # absolute improvement required to reset patience
+
+  # --- LR scheduling ---
+  lr_scheduler: "plateau"        # "plateau" -> ReduceLROnPlateau, anything else -> no scheduler
+  lr_decay_factor: 0.5           # factor for ReduceLROnPlateau
+  lr_decay_patience: 10          # patience (epochs) for Plateau
+  plateau_threshold: 1.0e-4      # improvement threshold
+  plateau_threshold_mode: "rel"  # "rel" or "abs"
+  lr_cooldown: 0
+  min_lr: 0.0
+
+  # --- logging / saving ---
+  save_states: false
+  log_training: false
+  save_results: true
+  save_model: false
+
+  # --- loss reduction / grouping ---
+  loss_reduction: "overall"      # "overall" | "per_class_equal" | "per_class_weighted"
+  regression_group_metric: "mse" # "mse" | "rmse" | "rrmse"
+
+interpretability:
+  compute_shap: false
+  shap_num_background: 128
+  shap_num_samples: 256
+  shap_kernel_nsamples: 200
+  # shap_classes: [0, 1]
+
+  save_influence: false
+  influence_step_fraction: 0.005
+  sweep_range: [-3.0, 3.0]
