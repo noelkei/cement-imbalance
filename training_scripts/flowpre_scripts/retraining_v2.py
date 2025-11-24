@@ -21,7 +21,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 try:
     from training.utils import ROOT_PATH
 except Exception:
-    ROOT_PATH = Path("../training").resolve()
+    ROOT_PATH = Path("../../training").resolve()
 if str(ROOT_PATH) not in sys.path:
     sys.path.append(str(ROOT_PATH))
 
