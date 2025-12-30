@@ -47,8 +47,13 @@ training:
   save_model: false
 
   # --- loss reduction / grouping ---
-  loss_reduction: "overall"      # "overall" | "per_class_equal" | "per_class_weighted"
-  regression_group_metric: "mse" # "mse" | "rmse" | "rrmse"
+  loss_reduction: "per_class_equal"      # "overall" | "per_class_equal" | "per_class_weighted"
+  regression_group_metric: "rrmse" # "mse" | "rmse" | "rrmse"
+
+  # dataloader
+  dataloader_mode: baseline   # baseline | balanced
+  cycle_reals: true
+  allow_synth: true
 
 interpretability:
   compute_shap: false

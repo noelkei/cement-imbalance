@@ -237,3 +237,88 @@ def load_scaled_sets(
             print(f"  - {nm:7s}: shape={df.shape}")
 
     return X_train, X_val, X_test, y_train, y_val, y_test
+
+# training/utils.py (or same module where load_scaled_sets lives)
+
+def load_augmented_scaled_sets(
+    folder_name: str,
+    *,
+    root: Path | None = None,
+    require_condition_col: Optional[str] = "type",
+    verbose: bool = True,
+):
+    """
+    Same API as before, but loads from augmented_scaled_sets and
+    drops 'is_synth' column if present.
+    """
+
+    from training.utils import ROOT_PATH
+
+    base = (root or Path(ROOT_PATH)) / "data" / "sets" / "augmented_scaled_sets" / f"{folder_name}"
+    x_dir = base / "X"
+    y_dir = base / "y"
+
+    if not base.exists():
+        raise FileNotFoundError(f"Dataset folder not found: {base}")
+
+    # locate csvs
+    x_tr_p = _find_one_csv(x_dir, "*_X_train.csv")
+    x_va_p = _find_one_csv(x_dir, "*_X_val.csv")
+    x_te_p = _find_one_csv(x_dir, "*_X_test.csv")
+
+    y_tr_p = _find_one_csv(y_dir, "*_y_train.csv")
+    y_va_p = _find_one_csv(y_dir, "*_y_val.csv")
+    y_te_p = _find_one_csv(y_dir, "*_y_test.csv")
+
+    # read
+    X_train = _read_csv_enforce(x_tr_p, name="X_train")
+    X_val = _read_csv_enforce(x_va_p, name="X_val")
+    X_test = _read_csv_enforce(x_te_p, name="X_test")
+
+    y_train = _read_csv_enforce(y_tr_p, name="y_train")
+    y_val = _read_csv_enforce(y_va_p, name="y_val")
+    y_test = _read_csv_enforce(y_te_p, name="y_test")
+
+    # --------------------------------------------------
+    # DROP is_synth (if exists)
+    # --------------------------------------------------
+    for df in (X_train, X_val, X_test, y_train, y_val, y_test):
+        if "is_synth" in df.columns:
+            df.drop(columns=["is_synth"], inplace=True)
+
+    # --------------------------------------------------
+    # Schema checks (same as before)
+    # --------------------------------------------------
+    if require_condition_col:
+        for df_name, df in (("X_train", X_train), ("X_val", X_val), ("X_test", X_test)):
+            if require_condition_col not in df.columns:
+                raise ValueError(f"{df_name} missing '{require_condition_col}' column")
+            df[require_condition_col] = df[require_condition_col].astype(int, errors="ignore")
+
+    # --------------------------------------------------
+    # Sort for clean merges
+    # --------------------------------------------------
+    for df in (X_train, X_val, X_test, y_train, y_val, y_test):
+        df.sort_values("post_cleaning_index", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+    if verbose:
+        print(f"[load_scaled_sets] Loaded AUGMENTED set: augmented_{folder_name}")
+        for name, df in (
+            ("X_train", X_train), ("X_val", X_val), ("X_test", X_test),
+            ("y_train", y_train), ("y_val", y_val), ("y_test", y_test),
+        ):
+            print(f"  - {name:7s}: shape={df.shape}")
+
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+def list_augmented_scaled_sets(root: Path | None = None) -> List[str]:
+    """
+    List available dataset folders under data/sets/scaled_sets.
+    """
+    from training.utils import ROOT_PATH  # avoid circular import issues elsewhere
+    base = (root or Path(ROOT_PATH)) / "data" / "sets" / "augmented_scaled_sets"
+    if not base.exists():
+        return []
+    return sorted([d.name for d in base.iterdir() if d.is_dir()])
+

@@ -15,6 +15,8 @@ from nflows.transforms.coupling import (
 )
 from nflows.transforms.lu import LULinear
 from nflows.transforms.normalization import ActNorm
+from typing import Dict, Optional, Union
+
 
 torch.set_default_dtype(torch.float32)
 
@@ -246,6 +248,116 @@ class FlowGen(nn.Module):
         return x, y
 
     # ---------------------------
+    # Temperature (post-training calibration)
+    # ---------------------------
+    def set_temperature_table_xy(
+        self,
+        temps_by_class: Dict[int, Dict[str, float]],
+        *,
+        default_tx: float = 1.0,
+        default_ty: float = 1.0,
+    ):
+        """
+        Store per-class temperatures for the latent prior.
+        We scale latent z before inverse:
+          z_x *= T_x(class)
+          z_y *= T_y(class)
+
+        temps_by_class example:
+          {0: {"T_x": 1.0, "T_y": 1.0}, 1: {"T_x": 0.8, "T_y": 0.9}, ...}
+        """
+        # build tensor [num_classes, 2] -> [T_x, T_y]
+        num_classes = int(self.context_embedding.num_embeddings)
+        table = torch.ones(num_classes, 2, dtype=torch.float32)
+        table[:, 0] *= float(default_tx)
+        table[:, 1] *= float(default_ty)
+
+        for cls, d in (temps_by_class or {}).items():
+            if cls is None:
+                continue
+            cls_i = int(cls)
+            if not (0 <= cls_i < num_classes):
+                continue
+            tx = float(d.get("T_x", d.get("tx", default_tx)))
+            ty = float(d.get("T_y", d.get("ty", default_ty)))
+            table[cls_i, 0] = tx
+            table[cls_i, 1] = ty
+
+        # register as buffer so it moves with .to_device and is saved if you ever torch.save(model.state_dict())
+        if hasattr(self, "temp_table_xy"):
+            self.temp_table_xy = table.to(self.device)
+        else:
+            self.register_buffer("temp_table_xy", table.to(self.device))
+
+        return self
+
+    def get_temperature_xy(self, class_labels: torch.Tensor) -> torch.Tensor:
+        """
+        Returns per-sample [T_x, T_y] as shape [N, 2] on model.device.
+        If no table exists, returns ones.
+        """
+        if not hasattr(self, "temp_table_xy") or self.temp_table_xy is None:
+            # default
+            n = int(class_labels.numel())
+            return torch.ones(n, 2, device=self.device, dtype=torch.float32)
+
+        c = class_labels.to(self.device).to(torch.long).view(-1)
+        return self.temp_table_xy.index_select(0, c)
+
+    def _apply_temperature_to_z(self, z: torch.Tensor, class_labels: torch.Tensor) -> torch.Tensor:
+        """
+        Scale z's first x_dim coords with T_x and last y_dim coords with T_y (per sample).
+        """
+        z = z.to(self.device, dtype=torch.float32)
+        c = class_labels.to(self.device).to(torch.long).view(-1)
+
+        # [N, 2] : (T_x, T_y)
+        t = self.get_temperature_xy(c)
+        tx = t[:, 0].view(-1, 1)
+        ty = t[:, 1].view(-1, 1)
+
+        # scale blocks
+        z_scaled = z.clone()
+        if self.x_dim > 0:
+            z_scaled[:, : self.x_dim] = z_scaled[:, : self.x_dim] * tx
+        if self.y_dim > 0:
+            z_scaled[:, self.x_dim :] = z_scaled[:, self.x_dim :] * ty
+        return z_scaled
+
+    def sample_with_temperature(self, num_samples: int, class_labels: torch.Tensor):
+        """
+        Same as sample(), but scales latent z using per-class temperatures before inverse.
+        If no temperature table set, behaves like normal sampling.
+        """
+        device = self.device
+        if not torch.is_tensor(class_labels):
+            class_labels = torch.as_tensor(class_labels, dtype=torch.long, device=device)
+
+        class_labels = class_labels.to(torch.long).to(device)
+        if class_labels.dim() == 0:
+            class_labels = class_labels.view(1)
+
+        if class_labels.numel() == 1:
+            class_labels = class_labels.expand(num_samples)
+        else:
+            assert class_labels.numel() == num_samples, \
+                f"class_labels has {class_labels.numel()} items, expected {num_samples}"
+
+        context = self.get_context(class_labels)
+        z = torch.randn(num_samples, self.input_dim, device=device, dtype=torch.float32)
+
+        # APPLY temperature here
+        z = self._apply_temperature_to_z(z, class_labels)
+
+        xy, _ = self.flow._transform.inverse(z, context)
+        return xy
+
+    def sample_xy_with_temperature(self, num_samples: int, class_labels: torch.Tensor):
+        xy = self.sample_with_temperature(num_samples, class_labels)
+        x, y = self._split_xy(xy)
+        return x, y
+
+    # ---------------------------
     # Device
     # ---------------------------
     def to_device(self, device: str | torch.device):
@@ -253,6 +365,3 @@ class FlowGen(nn.Module):
         self.flow.to(dtype=torch.float32, device=device)
         self.context_embedding.to(dtype=torch.float32, device=device)
         return self
-
-
-

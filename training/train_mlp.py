@@ -26,6 +26,51 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+class BalancedBatchSampler(torch.utils.data.Sampler):
+    """
+    Guarantees fixed class proportions PER BATCH.
+    Assumes dataset is already balanced in total size.
+    """
+    def __init__(self, labels, batch_size, seed=None):
+        self.labels = np.asarray(labels)
+        self.batch_size = batch_size
+        self.classes = np.unique(self.labels)
+        self.n_classes = len(self.classes)
+
+        assert batch_size % self.n_classes == 0, (
+            f"batch_size={batch_size} must be divisible by num_classes={self.n_classes}"
+        )
+
+        self.per_class = batch_size // self.n_classes
+        self.rng = np.random.default_rng(seed)
+
+        self.class_indices = {
+            c: np.where(self.labels == c)[0].tolist()
+            for c in self.classes
+        }
+
+        self.num_batches = min(
+            len(v) // self.per_class for v in self.class_indices.values()
+        )
+
+    def __iter__(self):
+        for v in self.class_indices.values():
+            self.rng.shuffle(v)
+
+        for i in range(self.num_batches):
+            batch = []
+            for c in self.classes:
+                start = i * self.per_class
+                end = start + self.per_class
+                batch.extend(self.class_indices[c][start:end])
+
+            self.rng.shuffle(batch)
+            yield batch
+
+    def __len__(self):
+        return self.num_batches
+
+
 def compute_feature_influence_mlp(
     model: nn.Module,
     x: torch.Tensor,
@@ -236,6 +281,196 @@ def prepare_mlp_dataloader(
         train_dataset, train_loader
     )
 
+def prepare_mlp_dataloader_balanced(
+    df_train: pd.DataFrame,
+    df_val: pd.DataFrame,
+    condition_col: str,
+    batch_size: int,
+    device: torch.device,
+    *,
+    df_test: Optional[pd.DataFrame] = None,
+    seed: Optional[int] = None,
+    y_cols: Optional[Union[str, List[str]]] = "init",
+    cycle_reals: bool = True,
+    allow_synth: bool = True,
+) -> tuple:
+    """
+    Advanced DataLoader with:
+      - real samples ALWAYS included
+      - optional synth usage (never cycled)
+      - optional cycling of REAL samples only
+      - balanced batches if cycling, proportional otherwise
+    """
+
+    if isinstance(y_cols, str):
+        y_cols = [y_cols]
+    target_names = list(y_cols)
+
+    rng = np.random.default_rng(seed)
+
+    # -------------------- checks --------------------
+    def _check(df: pd.DataFrame, name: str):
+        if condition_col not in df.columns:
+            raise ValueError(f"[{name}] missing condition_col '{condition_col}'.")
+        for yc in target_names:
+            if yc not in df.columns:
+                raise ValueError(f"[{name}] missing target column '{yc}'.")
+
+    _check(df_train, "train")
+    _check(df_val, "val")
+    if df_test is not None:
+        _check(df_test, "test")
+
+    def _drop_synth(df: pd.DataFrame, name: str):
+        if "is_synth" in df.columns:
+            return df[df["is_synth"] == 0].copy()
+        return df
+
+    df_val = _drop_synth(df_val, "val")
+    if df_test is not None:
+        df_test = _drop_synth(df_test, "test")
+
+    has_synth = "is_synth" in df_train.columns
+
+    # -------------------- feature selection (DROP is_synth) --------------------
+    excluded = {"post_cleaning_index", condition_col, *target_names}
+    if has_synth:
+        excluded.add("is_synth")
+
+    feature_names_x = [c for c in df_train.columns if c not in excluded]
+
+    def _features(df: pd.DataFrame):
+        return [c for c in df.columns if c not in excluded]
+
+    if feature_names_x != _features(df_val):
+        raise ValueError("Feature columns mismatch train/val.")
+    if df_test is not None and feature_names_x != _features(df_test):
+        raise ValueError("Feature columns mismatch train/test.")
+
+    # -------------------- tensors --------------------
+    def _to_tensors(df: pd.DataFrame):
+        x = torch.tensor(df[feature_names_x].values, dtype=torch.float32, device=device)
+        y = torch.tensor(df[target_names].values,    dtype=torch.float32, device=device)
+        c = torch.tensor(df[condition_col].values,   dtype=torch.long,    device=device)
+        return x, y, c
+
+    x_train, y_train, c_train = _to_tensors(df_train)
+    x_val,   y_val,   c_val   = _to_tensors(df_val)
+    x_test = y_test = c_test = None
+    if df_test is not None:
+        x_test, y_test, c_test = _to_tensors(df_test)
+
+    # -------------------- per-class indices --------------------
+    classes = sorted(df_train[condition_col].unique().tolist())
+
+    real_idx = {}
+    synth_idx = {}
+
+    for cls in classes:
+        df_c = df_train[df_train[condition_col] == cls]
+
+        if has_synth:
+            real_idx[cls] = df_c[df_c["is_synth"] == 0].index.to_numpy()
+            synth_idx[cls] = df_c[df_c["is_synth"] == 1].index.to_numpy()
+        else:
+            real_idx[cls] = df_c.index.to_numpy()
+            synth_idx[cls] = np.array([], dtype=int)
+
+    # -------------------- target size --------------------
+    if cycle_reals:
+        # balance on TOTAL (real + synth)
+        n_target = max(
+            len(real_idx[c]) + (len(synth_idx[c]) if allow_synth else 0)
+            for c in classes
+        )
+    else:
+        n_target = None  # proportional
+
+    # -------------------- build final index list --------------------
+    final_indices = []
+
+    for cls in classes:
+        cls_indices = []
+
+        n_real = len(real_idx[cls])
+        n_synth = len(synth_idx[cls]) if allow_synth else 0
+
+        # 1️⃣ always include REAL
+        cls_indices.extend(real_idx[cls].tolist())
+
+        # 2️⃣ include SYNTH once if allowed
+        if allow_synth:
+            cls_indices.extend(synth_idx[cls].tolist())
+
+        # 3️⃣ cycle REALS only if enabled
+        if cycle_reals:
+            n_current = n_real + n_synth
+            n_missing = n_target - n_current
+
+            if n_missing > 0:
+                sampled = rng.choice(
+                    real_idx[cls],
+                    size=n_missing,
+                    replace=True
+                )
+                cls_indices.extend(sampled.tolist())
+
+        final_indices.extend(cls_indices)
+
+    final_indices = np.array(final_indices, dtype=int)
+    rng.shuffle(final_indices)
+
+    x_train_final = x_train[final_indices]
+    y_train_final = y_train[final_indices]
+    c_train_final = c_train[final_indices]
+
+    # -------------------- dataset & loader --------------------
+    train_dataset = TensorDataset(
+        x_train_final,
+        y_train_final,
+        c_train_final,
+    )
+
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed if seed is not None else torch.initial_seed()))
+
+    if cycle_reals:
+        n_classes = len(classes)
+        if batch_size % n_classes != 0:
+            raise ValueError(
+                f"batch_size={batch_size} must be divisible by num_classes={n_classes} "
+                "when cycle_reals=True"
+            )
+
+        sampler = BalancedBatchSampler(
+            labels=c_train_final.cpu().numpy(),
+            batch_size=batch_size,
+            seed=seed,
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=sampler,
+            num_workers=0,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=g,
+            num_workers=0,
+            drop_last=False,
+        )
+
+    return (
+        x_train_final, y_train_final,
+        x_val, y_val,
+        x_test, y_test,
+        c_train_final, c_val, c_test,
+        feature_names_x, target_names,
+        train_dataset, train_loader
+    )
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Build ContextMLPRegressor from config
@@ -371,30 +606,86 @@ def train_mlp_model(
         non_meta = [c for c in cXy_val.columns if c not in ["post_cleaning_index", condition_col]]
         y_cols_cfg = [non_meta[-1]]  # last column as target
 
-    (
-        x_train, y_train,
-        x_val, y_val,
-        x_test, y_test,
-        c_train, c_val, c_test,
-        feature_names_x, target_names,
-        train_dataset, train_loader
-    ) = prepare_mlp_dataloader(
-        df_train=cXy_train,
-        df_val=cXy_val,
-        condition_col=condition_col,
-        batch_size=int(train_cfg["batch_size"]),
-        device=dev,
-        df_test=cXy_test,
-        seed=seed,
-        y_cols=y_cols_cfg,
-    )
+    dataloader_mode = str(train_cfg.get("dataloader_mode", "baseline")).lower()
+    allow_synth = bool(train_cfg.get("allow_synth", True))
+    cycle_reals = bool(train_cfg.get("cycle_reals", True))
+
+    def _filter_rows_synth(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None:
+            return None
+        if ("is_synth" in df.columns) and (not allow_synth):
+            return df[df["is_synth"] == 0].copy()
+        return df
+
+    def _drop_col_synth(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None:
+            return None
+        if "is_synth" in df.columns:
+            return df.drop(columns=["is_synth"]).copy()
+        return df
+
+    # 1) si allow_synth=False, quitamos filas synth (train/val/test)
+    cXy_train = _filter_rows_synth(cXy_train)
+    cXy_val = _filter_rows_synth(cXy_val)
+    cXy_test = _filter_rows_synth(cXy_test)
+
+    # 2) si baseline, quitamos la columna is_synth (si existe), porque si no se convierte en feature
+    if dataloader_mode == "baseline":
+        cXy_train = _drop_col_synth(cXy_train)
+        cXy_val = _drop_col_synth(cXy_val)
+        cXy_test = _drop_col_synth(cXy_test)
+
+    if dataloader_mode == "balanced":
+        (
+            x_train, y_train,
+            x_val, y_val,
+            x_test, y_test,
+            c_train, c_val, c_test,
+            feature_names_x, target_names,
+            train_dataset, train_loader
+        ) = prepare_mlp_dataloader_balanced(
+            df_train=cXy_train,
+            df_val=cXy_val,
+            df_test=cXy_test,
+            condition_col=condition_col,
+            batch_size=int(train_cfg["batch_size"]),
+            device=dev,
+            seed=seed,
+            y_cols=y_cols_cfg,
+            cycle_reals=cycle_reals,
+            allow_synth=allow_synth,
+        )
+    elif dataloader_mode == "baseline":
+        (
+            x_train, y_train,
+            x_val, y_val,
+            x_test, y_test,
+            c_train, c_val, c_test,
+            feature_names_x, target_names,
+            train_dataset, train_loader
+        ) = prepare_mlp_dataloader(
+            df_train=cXy_train,
+            df_val=cXy_val,
+            condition_col=condition_col,
+            batch_size=int(train_cfg["batch_size"]),
+            device=dev,
+            df_test=cXy_test,
+            seed=seed,
+            y_cols=y_cols_cfg,
+        )
+
+    else:
+        raise ValueError(
+            f"Unsupported dataloader_mode='{dataloader_mode}'. "
+            "Use 'baseline' or 'balanced'."
+        )
 
     # Build model
     model = build_mlp_model(
         model_cfg=model_cfg,
         x_dim=x_train.shape[1],
         y_dim=y_train.shape[1],
-        num_classes=int(c_train.max().item()) + 1,
+        num_classes = int(torch.unique(c_train).numel()),
         device=dev,
     )
 
@@ -531,6 +822,59 @@ def train_mlp_model(
     def _metrics_split(x, y, c) -> dict:
         model.eval()
         with torch.no_grad():
+
+            quantile_ranges = {
+                "0_50": (0.0, 0.5),
+                "0_75": (0.0, 0.75),
+                "25_75": (0.25, 0.75),
+                "10_90": (0.10, 0.90),
+                "5_95": (0.05, 0.95),
+                "90_100": (0.90, 1.0),
+            }
+
+            def _quantile_metrics(err, y, quantile_ranges):
+                abs_err = torch.abs(err)
+                out = {}
+
+                for qname, (qlo, qhi) in quantile_ranges.items():
+                    lo = torch.quantile(abs_err, qlo)
+                    hi = torch.quantile(abs_err, qhi)
+
+                    m = (abs_err >= lo) & (abs_err <= hi)
+                    if not torch.any(m):
+                        continue
+
+                    e = err[m]
+                    yt = y[m]
+
+                    mse = float(torch.mean(e ** 2))
+                    rmse = float(torch.sqrt(torch.mean(e ** 2) + 1e-12))
+                    rrmse = float(
+                        (torch.sqrt(torch.mean(e ** 2)) /
+                         (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
+                    )
+                    mae = float(torch.mean(torch.abs(e)))
+                    medae = float(torch.median(torch.abs(e)))
+                    mape = float(torch.mean(torch.abs(e) / (torch.clamp(torch.abs(yt), min=1e-8))).item())
+
+                    yt_mu = yt.mean(dim=0)
+                    ss_res = torch.sum(e ** 2)
+                    ss_tot = torch.sum((yt - yt_mu) ** 2)
+                    r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
+
+                    out[qname] = {
+                        "mse": mse,
+                        "rmse": rmse,
+                        "rrmse": rrmse,
+                        "mae": mae,
+                        "medae": medae,
+                        "mape": mape,
+                        "r2": r2,
+                        "n": int(m.sum().item()),
+                    }
+
+                return out
+
             y_hat = model(x, c)
 
             err = y_hat - y
@@ -541,12 +885,15 @@ def train_mlp_model(
                  (torch.sqrt(torch.mean(y ** 2)) + 1e-12)).item()
             )
             mae = float(torch.mean(torch.abs(err)))
+            medae = float(torch.median(torch.abs(err)))
             mape = float(torch.mean(torch.abs(err) / (torch.clamp(torch.abs(y), min=1e-8))).item())
 
             y_mu = y.mean(dim=0)
             ss_res = torch.sum((y - y_hat) ** 2)
             ss_tot = torch.sum((y - y_mu) ** 2)
             r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
+
+            quantiles_overall = _quantile_metrics(err, y, quantile_ranges)
 
             # per-class
             out_pc = {}
@@ -564,6 +911,8 @@ def train_mlp_model(
                      (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
                 )
                 mae_c = float(torch.mean(torch.abs(e)))
+                medae_c = float(torch.median(torch.abs(e)))
+
                 mape_c = float(torch.mean(torch.abs(e) / (torch.clamp(torch.abs(yt), min=1e-8))).item())
 
                 yt_mu = yt.mean(dim=0)
@@ -571,13 +920,32 @@ def train_mlp_model(
                 ss_tot_c = torch.sum((yt - yt_mu) ** 2)
                 r2_c = float(1.0 - ss_res_c / (ss_tot_c + 1e-12))
 
+                quantiles_c = _quantile_metrics(e, yt, quantile_ranges)
+
                 out_pc[int(cls.item())] = {
-                    "mse": mse_c, "rmse": rmse_c, "rrmse": rrmse_c,
-                    "mae": mae_c, "mape": mape_c, "r2": r2_c,
+                    "mse": mse_c,
+                    "rmse": rmse_c,
+                    "rrmse": rrmse_c,
+                    "mae": mae_c,
+                    "medae": medae_c,
+                    "mape": mape_c,
+                    "r2": r2_c,
                     "n": int(m.sum().item()),
+                    "quantiles": quantiles_c,
+
                 }
 
-        overall = {"mse": mse, "rmse": rmse, "rrmse": rrmse, "mae": mae, "mape": mape, "r2": r2}
+        overall = {
+            "mse": mse,
+            "rmse": rmse,
+            "rrmse": rrmse,
+            "mae": mae,
+            "medae": medae,
+            "mape": mape,
+            "r2": r2,
+            "quantiles": quantiles_overall,
+        }
+
         return {"overall": overall, "per_class": out_pc}
 
     train_metrics = _metrics_split(x_train, y_train, c_train)
@@ -716,10 +1084,22 @@ def train_mlp_pipeline(
     def _build_cXy(X_df: pd.DataFrame, y_df: pd.DataFrame) -> pd.DataFrame:
         X_df = X_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
         y_df = y_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
+
         df = pd.merge(X_df, y_df, on="post_cleaning_index", how="inner", validate="one_to_one")
+
+        # --- columnas X ---
         x_cols = [c for c in X_df.columns if c not in ("post_cleaning_index", condition_col)]
+
+        # si existe is_synth, queremos mantenerla pero en una posición estable
+        synth_cols = []
+        if "is_synth" in x_cols:
+            x_cols.remove("is_synth")
+            synth_cols = ["is_synth"]
+
+        # --- columnas y ---
         y_cols = [c for c in y_df.columns if c != "post_cleaning_index"]
-        return df[["post_cleaning_index", condition_col] + x_cols + y_cols].copy()
+
+        return df[["post_cleaning_index", condition_col] + synth_cols + x_cols + y_cols].copy()
 
     cXy_tr = _build_cXy(X_train, y_train)
     cXy_va = _build_cXy(X_val,   y_val)

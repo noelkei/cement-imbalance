@@ -12,6 +12,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from scipy.stats import skew, kurtosis, chi2, kstest
 import yaml
 
+import time
+from scipy.optimize import minimize
+
+
 from models.flowgen import FlowGen
 from losses.flowgen_loss import (
     flowgen_loss, _ks_w1_matrix, _mmd_rbf_biased, _pearson_corr, _spearman_corr, _fro_rel, EPS, _iqr,
@@ -1018,6 +1022,773 @@ def compute_realism_metrics_for_set(
             }
         return realism
 
+def compute_realism_metrics_for_set_with_temperature(
+    model,
+    x_ref: torch.Tensor,
+    y_ref: torch.Tensor,
+    c_ref: torch.Tensor,
+    *,
+    temps_by_class: dict,
+    loss_like_kwargs: dict,
+    device: torch.device,
+    seed: int | None = None,
+) -> dict:
+    """
+    EXACTLY like compute_realism_metrics_for_set, but synthetic samples
+    are generated using FlowGen.sample_xy_with_temperature().
+    """
+    """
+    Full-set realism metrics using ALL reference data, averaged over bootstrap replicates.
+    For each replicate:
+      • sample per-class synthetic with counts == full real per-class counts,
+      • compute KS/W1 (normalized), Pearson/Spearman Fro (abs/rel), and MMD² ratio
+        for overall | X | y and per-class,
+      • RvR median uses the same σ as the replicate's RvS to keep ratios fair.
+    All knobs come from loss_like_kwargs via .get(...).
+    """
+
+    EPS_METRIC = 1e-6  # metric-scale stabilization for MMD
+
+    def _finite_and_clamp_to_real(xr_c, yr_c, xs_c, ys_c):
+        # drop non-finite synth rows
+        finite = torch.isfinite(xs_c).all(dim=1) & torch.isfinite(ys_c).all(dim=1)
+        xs_c = xs_c[finite];
+        ys_c = ys_c[finite]
+
+        # robust per-class bounds from REAL (5 * IQR)
+        q25x = xr_c.quantile(0.25, dim=0);
+        q75x = xr_c.quantile(0.75, dim=0)
+        iqr_x = (q75x - q25x).clamp_min(1e-6)
+        lo_x = q25x - 5.0 * iqr_x;
+        hi_x = q75x + 5.0 * iqr_x
+
+        q25y = yr_c.quantile(0.25, dim=0);
+        q75y = yr_c.quantile(0.75, dim=0)
+        iqr_y = (q75y - q25y).clamp_min(1e-6)
+        lo_y = q25y - 5.0 * iqr_y;
+        hi_y = q75y + 5.0 * iqr_y
+
+        # clamp synth to real support
+        xs_c = xs_c.clamp(min=lo_x, max=hi_x)
+        ys_c = ys_c.clamp(min=lo_y, max=hi_y)
+        return xs_c, ys_c
+
+    model.set_temperature_table_xy(temps_by_class)
+    model.eval()
+
+    t0 = time.perf_counter()
+    print(
+        f"[Realism] START | boots={loss_like_kwargs.get('realism_bootstrap')} "
+        f"| rvr={loss_like_kwargs.get('realism_rvr_bootstrap')} "
+        f"| device={device}"
+    )
+
+    # ---- RNG (tunable offset) ----
+    gen_cpu = torch.Generator(device="cpu")
+    if seed is not None:
+        gen_cpu.manual_seed(int(seed) + int(loss_like_kwargs.get("realism_seed_offset", 0)))
+
+    with torch.no_grad():
+        Dx = int(x_ref.shape[1]); Dy = int(y_ref.shape[1]); Dxy = Dx + Dy
+
+        # ---- eval knobs (all tunable) ----
+        boots       = int(loss_like_kwargs.get("realism_bootstrap", 10))  # number of RvS replicates (averaged)
+        rvr_boots   = int(loss_like_kwargs.get("realism_rvr_bootstrap", boots))  # RvR median bootstraps per replicate
+
+        ks_grid_x   = int(loss_like_kwargs.get("ks_grid_points_x", 64))
+        ks_tau_x    = float(loss_like_kwargs.get("ks_tau_x", 0.05))
+        w1_norm_x   = str(loss_like_kwargs.get("w1_x_norm", "iqr"))
+
+        ks_grid_y   = int(loss_like_kwargs.get("ks_grid_points_y", 64))
+        ks_tau_y    = float(loss_like_kwargs.get("ks_tau_y", 0.05))
+        w1_norm_y   = str(loss_like_kwargs.get("w1_y_norm", "iqr"))
+
+        ks_grid_all = int(loss_like_kwargs.get("ks_grid_points_all", max(ks_grid_x, ks_grid_y)))
+        ks_tau_all  = float(loss_like_kwargs.get("ks_tau_all", 0.5 * (ks_tau_x + ks_tau_y)))
+        w1_norm_all = str(loss_like_kwargs.get("w1_norm_all", "iqr"))
+
+        # ---- full real per-class pools (no subsampling) ----
+        classes = [int(ci) for ci in torch.unique(c_ref).tolist()]
+        counts = {cls: int((c_ref == cls).sum().item()) for cls in classes}
+
+        real_x_by_cls = {cls: x_ref[c_ref == cls] for cls in classes}
+        real_y_by_cls = {cls: y_ref[c_ref == cls] for cls in classes}
+
+        Xr_all = torch.cat([real_x_by_cls[cls] for cls in classes], dim=0)
+        Yr_all = torch.cat([real_y_by_cls[cls] for cls in classes], dim=0)
+
+        real_all_cat = torch.cat([Xr_all, Yr_all], dim=1)
+
+        # --- global denominators (from full real pools; fixed across reps/classes) ---
+        denom_all_global = _iqr(real_all_cat).to(torch.float32).clamp_min(1e-4)
+        denom_x_global = _iqr(Xr_all).to(torch.float32).clamp_min(1e-4)
+        denom_y_global = _iqr(Yr_all).to(torch.float32).clamp_min(1e-4)
+
+        # ---- accumulator helpers (no nested defs) ----
+        def _empty_suite(include_corr: bool) -> Dict[str, Optional[float]]:
+            base = {
+                "ks_mean": 0.0, "ks_median": 0.0,
+                "w1_mean": 0.0, "w1_median": 0.0,
+                "mmd2_rvs": 0.0, "mmd2_rvr_med": 0.0, "mmd2_ratio": 0.0,
+                # NEW: XY block corr (filled only for “overall”; kept here for shape consistency)
+                "xy_pearson_fro": 0.0, "xy_pearson_fro_rel": 0.0,
+                "xy_spearman_fro": 0.0, "xy_spearman_fro_rel": 0.0,
+                "_xycorr_count": 0,
+            }
+            if include_corr:
+                base.update({
+                    "pearson_fro": 0.0, "pearson_fro_rel": 0.0,
+                    "spearman_fro": 0.0, "spearman_fro_rel": 0.0,
+                    "_corr_count": 0,
+                })
+            return base
+
+        overall_acc = _empty_suite(include_corr=False)
+        x_acc       = _empty_suite(include_corr=True)
+        y_acc       = _empty_suite(include_corr=True)
+        per_class_acc: Dict[int, Dict[str, Dict[str, Optional[float]]]] = {
+            cls: {
+                "overall": _empty_suite(include_corr=False),
+                "x": _empty_suite(include_corr=True),
+                "y": _empty_suite(include_corr=True),
+            } for cls in counts.keys()
+        }
+
+        # ======================================================
+        # Replicates: generate full-size synthetic and evaluate
+        # ======================================================
+        for _rep in range(boots):
+            rep_t0 = time.perf_counter()
+            print(f"[Realism] bootstrap {_rep + 1}/{boots} – generating synth...")
+
+            # ---- generate synthetic per class with FULL real counts ----
+            synth_x_by_cls: Dict[int, torch.Tensor] = {}
+            synth_y_by_cls: Dict[int, torch.Tensor] = {}
+            for cls, n_real in counts.items():
+                ns = int(n_real)
+                if ns <= 0:
+                    # keep empty tensors if class absent (safety)
+                    synth_x_by_cls[cls] = real_x_by_cls[cls].new_zeros((0, Dx))
+                    synth_y_by_cls[cls] = real_y_by_cls[cls].new_zeros((0, Dy))
+                    continue
+
+                c_s = torch.full((ns,), cls, dtype=torch.long, device=device)
+
+                # ONLY CHANGE
+                xs_c, ys_c = model.sample_xy_with_temperature(ns, c_s)
+
+                xs_c, ys_c = _finite_and_clamp_to_real(real_x_by_cls[cls], real_y_by_cls[cls], xs_c, ys_c)
+                synth_x_by_cls[cls] = xs_c
+                synth_y_by_cls[cls] = ys_c
+
+            Xs_all = torch.cat([synth_x_by_cls[cls] for cls in counts.keys()], dim=0)
+            Ys_all = torch.cat([synth_y_by_cls[cls] for cls in counts.keys()], dim=0)
+            synth_all_cat = torch.cat([Xs_all, Ys_all], dim=1)
+
+            # ---------- helper to compute RvR median with fixed sigma ----------
+            def _mmd_rvr_median(real_mat: torch.Tensor, sigma: float, n_draws: int) -> float:
+                n = real_mat.size(0)
+                # draw with replacement, size = n each time (MPS-safe: sample on CPU)
+                vals = []
+                for _ in range(n_draws):
+                    idx1 = torch.randint(0, n, (n,), generator=gen_cpu, device="cpu").to(device)
+                    idx2 = torch.randint(0, n, (n,), generator=gen_cpu, device="cpu").to(device)
+                    r1 = real_mat.index_select(0, idx1)
+                    r2 = real_mat.index_select(0, idx2)
+                    m2, _ = _mmd_rbf_biased(r1, r2, sigma=sigma)
+                    vals.append(float(m2.detach()))
+                return float(torch.tensor(vals, device=device).median().detach())
+
+            # ===================== overall =====================
+            ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
+                real_all_cat, synth_all_cat,
+                grid_points=ks_grid_all, tau=ks_tau_all, norm=w1_norm_all,
+                denom_override=denom_all_global
+            )
+            mmd2_rvs_all, sigma_all = _mmd_rbf_biased(real_all_cat, synth_all_cat)
+            mmd2_rvr_med_all = _mmd_rvr_median(real_all_cat, sigma_all, rvr_boots)
+            overall_acc["ks_mean"]      += float(ks_mean.detach())
+            overall_acc["ks_median"]    += float(ks_med.detach())
+            overall_acc["w1_mean"]      += float(w1_mean.detach())
+            overall_acc["w1_median"]    += float(w1_med.detach())
+            overall_acc["mmd2_rvs"]     += float(mmd2_rvs_all.detach())
+            overall_acc["mmd2_rvr_med"] += float(mmd2_rvr_med_all)
+            overall_acc["mmd2_ratio"]   += float((mmd2_rvs_all / (mmd2_rvr_med_all + EPS_METRIC)).detach())
+
+            # ===================== X-only =====================
+            ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
+                Xr_all, Xs_all,
+                grid_points=ks_grid_x, tau=ks_tau_x, norm=w1_norm_x,
+                denom_override=denom_x_global
+            )
+            mmd2_rvs_x, sigma_x = _mmd_rbf_biased(Xr_all, Xs_all)
+            mmd2_rvr_med_x = _mmd_rvr_median(Xr_all, sigma_x, rvr_boots)
+            x_acc["ks_mean"]      += float(ks_mean.detach())
+            x_acc["ks_median"]    += float(ks_med.detach())
+            x_acc["w1_mean"]      += float(w1_mean.detach())
+            x_acc["w1_median"]    += float(w1_med.detach())
+            x_acc["mmd2_rvs"]     += float(mmd2_rvs_x.detach())
+            x_acc["mmd2_rvr_med"] += float(mmd2_rvr_med_x)
+            x_acc["mmd2_ratio"]   += float((mmd2_rvs_x / (mmd2_rvr_med_x + EPS_METRIC)).detach())
+
+            if Dx >= 2:
+                Cr = _pearson_corr(Xr_all);  Cs = _pearson_corr(Xs_all)
+                pe_abs, pe_rel = _fro_rel(Cr, Cs)
+                Crs = _spearman_corr(Xr_all); Css = _spearman_corr(Xs_all)
+                sp_abs, sp_rel = _fro_rel(Crs, Css)
+                x_acc["pearson_fro"]     += float(pe_abs.detach())
+                x_acc["pearson_fro_rel"] += float(pe_rel.detach())
+                x_acc["spearman_fro"]    += float(sp_abs.detach())
+                x_acc["spearman_fro_rel"]+= float(sp_rel.detach())
+                x_acc["_corr_count"]     += 1  # mark that we accumulated corr
+
+            # ===================== y-only =====================
+            ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
+                Yr_all, Ys_all,
+                grid_points=ks_grid_y, tau=ks_tau_y, norm=w1_norm_y,
+                denom_override=denom_y_global
+            )
+            mmd2_rvs_y, sigma_y = _mmd_rbf_biased(Yr_all, Ys_all)
+            mmd2_rvr_med_y = _mmd_rvr_median(Yr_all, sigma_y, rvr_boots)
+            y_acc["ks_mean"]      += float(ks_mean.detach())
+            y_acc["ks_median"]    += float(ks_med.detach())
+            y_acc["w1_mean"]      += float(w1_mean.detach())
+            y_acc["w1_median"]    += float(w1_med.detach())
+            y_acc["mmd2_rvs"]     += float(mmd2_rvs_y.detach())
+            y_acc["mmd2_rvr_med"] += float(mmd2_rvr_med_y)
+            y_acc["mmd2_ratio"]   += float((mmd2_rvs_y / (mmd2_rvr_med_y + EPS_METRIC)).detach())
+
+            if Dy >= 2:
+                Cr = _pearson_corr(Yr_all);  Cs = _pearson_corr(Ys_all)
+                pe_abs, pe_rel = _fro_rel(Cr, Cs)
+                Crs = _spearman_corr(Yr_all); Css = _spearman_corr(Ys_all)
+                sp_abs, sp_rel = _fro_rel(Crs, Css)
+                y_acc["pearson_fro"]     += float(pe_abs.detach())
+                y_acc["pearson_fro_rel"] += float(pe_rel.detach())
+                y_acc["spearman_fro"]    += float(sp_abs.detach())
+                y_acc["spearman_fro_rel"]+= float(sp_rel.detach())
+                y_acc["_corr_count"]     += 1
+
+            # === overall (concat) — existing KS/W1 & MMD keep as-is ===
+
+            # NEW XY correlation (on the X↔y block):
+            pe_abs_xy, pe_rel_xy = _pearson_xyblock_fro_gap(
+                model, Xr_all, Yr_all, Xs_all, Ys_all, relative=True
+            )
+            sp_abs_xy, sp_rel_xy = _softspearman_xyblock_fro_gap(
+                model, Xr_all, Yr_all, Xs_all, Ys_all, tau=float(loss_like_kwargs.get("corr_xy_tau", 0.05)),
+                relative=True
+            )
+            overall_acc["xy_pearson_fro"] += float(pe_abs_xy.detach())
+            overall_acc["xy_pearson_fro_rel"] += float(pe_rel_xy.detach())
+            overall_acc["xy_spearman_fro"] += float(sp_abs_xy.detach())
+            overall_acc["xy_spearman_fro_rel"] += float(sp_rel_xy.detach())
+            overall_acc["_xycorr_count"] += 1
+
+            # ===================== per-class =====================
+            for cls in counts.keys():
+                xr_c = real_x_by_cls[cls];  yr_c = real_y_by_cls[cls]
+                xs_c = synth_x_by_cls[cls]; ys_c = synth_y_by_cls[cls]
+
+                # overall (concat X|y)
+                rc_all = torch.cat([xr_c, yr_c], dim=1)
+                sc_all = torch.cat([xs_c, ys_c], dim=1)
+                ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
+                    rc_all, sc_all,
+                    grid_points=ks_grid_all, tau=ks_tau_all, norm=w1_norm_all,
+                    denom_override=denom_all_global
+                )
+                mmd2_rvs, sigma = _mmd_rbf_biased(rc_all, sc_all)
+                mmd2_rvr_med = _mmd_rvr_median(rc_all, sigma, rvr_boots)
+
+                pc_over = per_class_acc[cls]["overall"]
+                pc_over["ks_mean"]      += float(ks_mean.detach())
+                pc_over["ks_median"]    += float(ks_med.detach())
+                pc_over["w1_mean"]      += float(w1_mean.detach())
+                pc_over["w1_median"]    += float(w1_med.detach())
+                pc_over["mmd2_rvs"]     += float(mmd2_rvs.detach())
+                pc_over["mmd2_rvr_med"] += float(mmd2_rvr_med)
+                pc_over["mmd2_ratio"]   += float((mmd2_rvs / (mmd2_rvr_med + EPS_METRIC)).detach())
+
+                # X-only
+                ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
+                    xr_c, xs_c,
+                    grid_points=ks_grid_x, tau=ks_tau_x, norm=w1_norm_x,
+                    denom_override=denom_x_global
+                )
+                mmd2_rvs_x, sigma_x = _mmd_rbf_biased(xr_c, xs_c)
+                mmd2_rvr_med_x = _mmd_rvr_median(xr_c, sigma_x, rvr_boots)
+
+                pc_x = per_class_acc[cls]["x"]
+                pc_x["ks_mean"]      += float(ks_mean.detach())
+                pc_x["ks_median"]    += float(ks_med.detach())
+                pc_x["w1_mean"]      += float(w1_mean.detach())
+                pc_x["w1_median"]    += float(w1_med.detach())
+                pc_x["mmd2_rvs"]     += float(mmd2_rvs_x.detach())
+                pc_x["mmd2_rvr_med"] += float(mmd2_rvr_med_x)
+                pc_x["mmd2_ratio"]   += float((mmd2_rvs_x / (mmd2_rvr_med_x + EPS_METRIC)).detach())
+
+                if xr_c.shape[1] >= 2:
+                    Cr = _pearson_corr(xr_c);  Cs = _pearson_corr(xs_c)
+                    pe_abs, pe_rel = _fro_rel(Cr, Cs)
+                    Crs = _spearman_corr(xr_c); Css = _spearman_corr(xs_c)
+                    sp_abs, sp_rel = _fro_rel(Crs, Css)
+                    pc_x["pearson_fro"]      += float(pe_abs.detach())
+                    pc_x["pearson_fro_rel"]  += float(pe_rel.detach())
+                    pc_x["spearman_fro"]     += float(sp_abs.detach())
+                    pc_x["spearman_fro_rel"] += float(sp_rel.detach())
+                    pc_x["_corr_count"]      += 1
+
+                # y-only
+                ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
+                    yr_c, ys_c,
+                    grid_points=ks_grid_y, tau=ks_tau_y, norm=w1_norm_y,
+                    denom_override=denom_y_global
+                )
+                mmd2_rvs_y, sigma_y = _mmd_rbf_biased(yr_c, ys_c)
+                mmd2_rvr_med_y = _mmd_rvr_median(yr_c, sigma_y, rvr_boots)
+
+                pc_y = per_class_acc[cls]["y"]
+                pc_y["ks_mean"]      += float(ks_mean.detach())
+                pc_y["ks_median"]    += float(ks_med.detach())
+                pc_y["w1_mean"]      += float(w1_mean.detach())
+                pc_y["w1_median"]    += float(w1_med.detach())
+                pc_y["mmd2_rvs"]     += float(mmd2_rvs_y.detach())
+                pc_y["mmd2_rvr_med"] += float(mmd2_rvr_med_y)
+                pc_y["mmd2_ratio"]   += float((mmd2_rvs_y / (mmd2_rvr_med_y + EPS_METRIC)).detach())
+
+                if yr_c.shape[1] >= 2:
+                    Cr = _pearson_corr(yr_c);  Cs = _pearson_corr(ys_c)
+                    pe_abs, pe_rel = _fro_rel(Cr, Cs)
+                    Crs = _spearman_corr(yr_c); Css = _spearman_corr(ys_c)
+                    sp_abs, sp_rel = _fro_rel(Crs, Css)
+                    pc_y["pearson_fro"]      += float(pe_abs.detach())
+                    pc_y["pearson_fro_rel"]  += float(pe_rel.detach())
+                    pc_y["spearman_fro"]     += float(sp_abs.detach())
+                    pc_y["spearman_fro_rel"] += float(sp_rel.detach())
+                    pc_y["_corr_count"]      += 1
+
+                # per-class overall XY block correlation
+                pe_abs_xy, pe_rel_xy = _pearson_xyblock_fro_gap(
+                    model, xr_c, yr_c, xs_c, ys_c, relative=True
+                )
+                sp_abs_xy, sp_rel_xy = _softspearman_xyblock_fro_gap(
+                    model, xr_c, yr_c, xs_c, ys_c, tau=float(loss_like_kwargs.get("corr_xy_tau", 0.05)), relative=True
+                )
+                pc_over["xy_pearson_fro"] += float(pe_abs_xy.detach())
+                pc_over["xy_pearson_fro_rel"] += float(pe_rel_xy.detach())
+                pc_over["xy_spearman_fro"] += float(sp_abs_xy.detach())
+                pc_over["xy_spearman_fro_rel"] += float(sp_rel_xy.detach())
+                pc_over["_xycorr_count"] += 1
+
+            rep_elapsed = time.perf_counter() - rep_t0
+            print(f"[Realism] bootstrap {_rep + 1}/{boots} DONE in {rep_elapsed:.1f}s")
+
+        # ---- finalize averages over replicates ----
+        def _finalize_suite(acc: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
+            out = {
+                "ks_mean": acc["ks_mean"] / boots,
+                "ks_median": acc["ks_median"] / boots,
+                "w1_mean": acc["w1_mean"] / boots,
+                "w1_median": acc["w1_median"] / boots,
+                "pearson_fro": None, "pearson_fro_rel": None,
+                "spearman_fro": None, "spearman_fro_rel": None,
+                # NEW: XY block corr (only for “overall”, so may stay None elsewhere)
+                "xy_pearson_fro": None, "xy_pearson_fro_rel": None,
+                "xy_spearman_fro": None, "xy_spearman_fro_rel": None,
+                "mmd2_rvs": acc["mmd2_rvs"] / boots,
+                "mmd2_rvr_med": acc["mmd2_rvr_med"] / boots,
+                "mmd2_ratio": acc["mmd2_ratio"] / boots,
+            }
+            if "_corr_count" in acc and acc["_corr_count"] > 0:
+                k = float(acc["_corr_count"])
+                out["pearson_fro"] = acc["pearson_fro"] / k
+                out["pearson_fro_rel"] = acc["pearson_fro_rel"] / k
+                out["spearman_fro"] = acc["spearman_fro"] / k
+                out["spearman_fro_rel"] = acc["spearman_fro_rel"] / k
+            if "_xycorr_count" in acc and acc["_xycorr_count"] > 0:
+                kxy = float(acc["_xycorr_count"])
+                out["xy_pearson_fro"] = acc["xy_pearson_fro"] / kxy
+                out["xy_pearson_fro_rel"] = acc["xy_pearson_fro_rel"] / kxy
+                out["xy_spearman_fro"] = acc["xy_spearman_fro"] / kxy
+                out["xy_spearman_fro_rel"] = acc["xy_spearman_fro_rel"] / kxy
+            return {kk: (None if vv is None else float(vv)) for kk, vv in out.items()}
+
+        realism = {
+            "overall": _finalize_suite(overall_acc),
+            "x": _finalize_suite(x_acc),
+            "y": _finalize_suite(y_acc),
+            "per_class": {},
+        }
+        for cls, suites in per_class_acc.items():
+            realism["per_class"][int(cls)] = {
+                "overall": _finalize_suite(suites["overall"]),
+                "x": _finalize_suite(suites["x"]),
+                "y": _finalize_suite(suites["y"]),
+            }
+
+        total_elapsed = time.perf_counter() - t0
+        print(f"[Realism] END | total time = {total_elapsed / 60:.2f} min")
+
+        return realism
+
+def compute_class_weights_subset(counts: dict, classes: list[int], mode: str) -> dict:
+    sub = {c: counts[c] for c in classes}
+
+    if mode == "proportional":
+        s = sum(sub.values())
+        return {c: sub[c] / s for c in sub}
+
+    if mode == "equal":
+        k = len(sub)
+        return {c: 1.0 / k for c in sub}
+
+    if mode == "inverse":
+        inv = {c: 1.0 / max(1, sub[c]) for c in sub}
+        s = sum(inv.values())
+        return {c: inv[c] / s for c in inv}
+
+    raise ValueError(f"Unknown class_weight_mode: {mode}")
+
+
+def optimize_temperature_table(
+    model,
+    x_ref,
+    y_ref,
+    c_ref,
+    *,
+    classes_to_optimize: list[int],
+    metric_weights: dict,
+    loss_like_kwargs: dict,
+    device,
+    class_weight_mode: str = "inverse",
+    tx_bounds=(0.6, 1.4),
+    ty_bounds=(0.6, 1.4),
+    max_evals: int = 40,
+    seed: int | None = None,
+    save_yaml_path: str | None = None,
+):
+    """
+    Deterministic post-hoc optimization of per-class (T_x, T_y)
+    using Nelder–Mead.
+    """
+
+    model.eval()
+
+    EPS_METRIC = 1e-6  # metric-scale stabilization
+
+    def _normalize_metric(path: str, cls_metrics: dict, raw_val: float) -> float:
+
+        """
+        Apply deadzones + robust MMD handling.
+        Returns the comparable metric value used for optimization.
+        """
+        val = float(raw_val)
+
+        # ---- deadzones ----
+        if path.endswith("ks_mean"):
+            val = max(0.0, val - 0.01)
+        elif path.endswith("w1_mean"):
+            val = max(0.0, val - 0.02)
+        elif path.endswith("pearson_fro_rel"):
+            val = max(0.0, val - 0.05)
+        elif path.endswith("xy_pearson_fro_rel"):
+            val = max(0.0, val - 0.05)
+        elif path.endswith("xy_spearman_fro_rel"):
+            val = max(0.0, val - 0.05)
+
+        # ---- ROBUST MMD handling (scale-invariant) ----
+        if path.endswith("mmd2_ratio"):
+            scope = path.split(".", 1)[0]  # overall / x / y
+            scoped = cls_metrics[scope]
+
+            rvs = max(scoped["mmd2_rvs"], EPS_METRIC)
+            rvr = max(scoped["mmd2_rvr_med"], EPS_METRIC)
+
+            # symmetric, scale-invariant distance
+            val = abs(math.log(rvs) - math.log(rvr))
+
+        return float(val)
+
+    def _get_by_path(d: dict, path: str):
+        obj = d
+        for p in path.split("."):
+            obj = obj[p]
+        return obj
+
+    classes_all = sorted(int(c) for c in torch.unique(c_ref).tolist())
+    classes_opt = sorted(int(c) for c in classes_to_optimize)
+
+    # --- counts ---
+    counts = {
+        int(c): int((c_ref == c).sum().item())
+        for c in classes_all
+    }
+
+    # --- weights ONLY over optimized classes ---
+    class_weights = compute_class_weights_subset(
+        counts, classes_opt, class_weight_mode
+    )
+
+    # ---- parameter layout ----
+    # theta = [Tx_c1, Ty_c1, Tx_c2, Ty_c2, ...]
+    idx = []
+    for c in classes_opt:
+        idx.append((c, "T_x"))
+        idx.append((c, "T_y"))
+
+    dim = len(idx)
+
+    # ---- initial point = identity ----
+    x0 = np.ones(dim, dtype=np.float64)
+
+    # ---- bounds ----
+    bounds = []
+    for (_, k) in idx:
+        bounds.append(tx_bounds if k == "T_x" else ty_bounds)
+
+    # ---- timing ----
+    t_start = time.perf_counter()
+    print(f"Optimizing {len(classes_opt)} classes")
+    eval_counter = 0
+
+    print("Computing BASELINE (identity temperatures)...")
+
+    identity_temps = {
+        int(c): {"T_x": 1.0, "T_y": 1.0}
+        for c in torch.unique(c_ref).tolist()
+    }
+
+    baseline_realism = compute_realism_metrics_for_set_with_temperature(
+        model=model,
+        x_ref=x_ref,
+        y_ref=y_ref,
+        c_ref=c_ref,
+        temps_by_class=identity_temps,
+        loss_like_kwargs=loss_like_kwargs,
+        device=device,
+        seed=seed,
+    )
+
+    # ---- best trackers for 3 objectives ----
+    best = {
+        "conservative": {"score": float("inf"), "theta": None, "temps": None},
+        "tradeoff": {"score": float("inf"), "theta": None, "temps": None},
+        "mixed": {"score": float("inf"), "theta": None, "temps": None},
+    }
+
+    # allowed relative degradation for MMD (5–20%)
+    MMD_TOLERANCE = 0.10  # 10% (cámbialo a 0.05–0.20 si quieres)
+
+    # ---- objective ----
+    def objective(theta: np.ndarray) -> float:
+        nonlocal eval_counter
+        eval_counter += 1
+
+        temps = {}
+
+        # identity for all
+        for c in classes_all:
+            temps[c] = {"T_x": 1.0, "T_y": 1.0}
+
+        # optimized ones
+        for i, (c, k) in enumerate(idx):
+            temps[c][k] = float(theta[i])
+
+        realism = compute_realism_metrics_for_set_with_temperature(
+            model=model,
+            x_ref=x_ref,
+            y_ref=y_ref,
+            c_ref=c_ref,
+            temps_by_class=temps,
+            loss_like_kwargs=loss_like_kwargs,
+            device=device,
+            seed=seed,
+        )
+
+        score_conservative = 0.0
+        score_tradeoff = 0.0
+
+        # para debug: guardamos contribuciones por objetivo
+        metric_debug = []
+
+        for c in classes_opt:
+            w_c = class_weights[c]
+
+            cls_metrics = realism["per_class"][c]
+            base_cls_metrics = baseline_realism["per_class"][c]
+
+            for path, w_m in metric_weights.items():
+                # raw values
+                raw_obj = _get_by_path(cls_metrics, path)
+                raw_base_obj = _get_by_path(base_cls_metrics, path)
+
+                if raw_obj is None or raw_base_obj is None:
+                    continue
+
+                raw_val = float(raw_obj)
+                raw_base_val = float(raw_base_obj)
+
+                # normalized comparable values (SAME pipeline)
+                val = _normalize_metric(path, cls_metrics, raw_val)
+                base_val = _normalize_metric(path, base_cls_metrics, raw_base_val)
+
+                delta = val - base_val  # >0 peor que baseline, <0 mejora
+
+                # =========================================================
+                # 1) CONSERVATIVE: penaliza cualquier empeoramiento vs baseline
+                # =========================================================
+                cons_term = max(0.0, delta)  # solo empeoramientos
+                cons_contrib = w_c * w_m * cons_term
+                score_conservative += cons_contrib
+
+                # =========================================================
+                # 2) TRADEOFF:
+                #    - permite empeorar MMD hasta MMD_TOLERANCE (relativo)
+                #    - recompensa mejoras XY (delta negativo)
+                #    - el resto lo tratamos conservador (penaliza empeoramientos)
+                # =========================================================
+                if path.endswith("mmd2_ratio"):
+                    # tolerancia RELATIVA: delta/base
+                    rel = delta / max(base_val, EPS_METRIC) if base_val is not None else delta
+                    # solo penaliza si superas la tolerancia
+                    trade_term = max(0.0, rel - MMD_TOLERANCE)
+                    trade_contrib = w_c * w_m * trade_term
+
+                elif ("xy_pearson_fro_rel" in path) or ("xy_spearman_fro_rel" in path):
+                    # recompensa solo mejoras (delta<0): suma negativo => mejor
+                    trade_term = min(0.0, delta)
+                    trade_contrib = w_c * w_m * trade_term
+
+                else:
+                    # resto: conservador
+                    trade_term = max(0.0, delta)
+                    trade_contrib = w_c * w_m * trade_term
+
+                score_tradeoff += trade_contrib
+
+                metric_debug.append((
+                    c, path,
+                    val, base_val, delta,
+                    w_m, w_c,
+                    cons_contrib, trade_contrib
+                ))
+
+        # =========================================================
+        # 3) MIXED: media entre conservative y tradeoff
+        #    (si tradeoff puede ser negativo por recompensas XY,
+        #     mixed recoge esa preferencia pero no se desmadra)
+        # =========================================================
+        score_mixed = 0.5 * score_conservative + 0.5 * score_tradeoff
+
+        # ---- timing info ----
+        elapsed = time.perf_counter() - t_start
+        avg_time = elapsed / eval_counter
+
+        # ---- update best trackers (3 objetivos) ----
+        def _update_best(tag: str, score_val: float):
+            if score_val < best[tag]["score"]:
+                best[tag]["score"] = float(score_val)
+                best[tag]["theta"] = theta.copy()
+                best[tag]["temps"] = {int(k): {"T_x": float(v["T_x"]), "T_y": float(v["T_y"])} for k, v in
+                                      temps.items()}
+
+        _update_best("conservative", score_conservative)
+        _update_best("tradeoff", score_tradeoff)
+        _update_best("mixed", score_mixed)
+
+        print(
+            f"\n[TempOpt] eval {eval_counter:03d} | elapsed={elapsed / 60:.2f} min | avg/eval={avg_time:.2f} s | "
+            f"S_cons={score_conservative:.6f} | S_trade={score_tradeoff:.6f} | S_mixed={score_mixed:.6f} | "
+            f"BEST_cons={best['conservative']['score']:.6f} | BEST_trade={best['tradeoff']['score']:.6f} | BEST_mixed={best['mixed']['score']:.6f}"
+        )
+
+        # ---- pretty debug: ordena por |impacto| en mixed (aprox) ----
+        # contrib_mixed = 0.5*cons + 0.5*trade
+        metric_debug.sort(key=lambda x: abs(0.5 * x[-2] + 0.5 * x[-1]), reverse=True)
+
+        for (c, path, val, base_val, delta, w_m, w_c, cons_contrib, trade_contrib) in metric_debug:
+            mixed_contrib = 0.5 * cons_contrib + 0.5 * trade_contrib
+            print(
+                f"  class {c:>2} | {path:35s} "
+                f"val={val:7.4f} base={base_val:7.4f} Δ={delta:+7.4f} "
+                f"(w_m={w_m:.2f}, w_c={w_c:.2f}) "
+                f"cons={cons_contrib:+.6f} trade={trade_contrib:+.6f} mixed={mixed_contrib:+.6f}"
+            )
+
+        # =========================================================
+        # >>>> LO QUE MINIMIZA NELDER-MEAD <<<<
+        # por defecto: mixed (recomendado)
+        # =========================================================
+        return float(score_mixed)
+
+    # ---- improved initial simplex ----
+    simplex = [x0]
+
+    rng = np.random.default_rng(seed)
+
+    for _ in range(len(x0)):
+        step = rng.normal(0.0, 0.08, size=len(x0))
+        step = np.clip(step, -0.15, 0.15)
+        simplex.append(np.clip(x0 + step,
+                               [b[0] for b in bounds],
+                               [b[1] for b in bounds]))
+
+    initial_simplex = np.vstack(simplex)
+
+    # ---- optimize ----
+    res = minimize(
+        objective,
+        x0,
+        method="Nelder-Mead",
+        bounds=bounds,
+        options={
+            "maxfev": max_evals,
+            "xatol": 1e-3,
+            "fatol": 1e-4,
+            "initial_simplex": initial_simplex,
+            "adaptive": True,  # <-- VERY IMPORTANT
+        },
+    )
+
+    # ---- build best temperature table ----
+    def _build_result(tag: str):
+        theta_best = best[tag]["theta"]
+        temps_best = best[tag]["temps"]
+
+        return {
+            "tag": tag,
+            "best_temps": temps_best,
+            "best_score": float(best[tag]["score"]),
+            "best_theta": None if theta_best is None else [float(x) for x in theta_best],
+            "success": bool(res.success),
+            "message": str(res.message),
+            "n_evals": int(res.nfev),
+            "class_weights": class_weights,
+            "classes_optimized": classes_opt,
+            "metric_weights": metric_weights,
+            "mmd_tolerance": float(MMD_TOLERANCE),
+            "minimize_target": "mixed",
+        }
+
+    result_all = {
+        "conservative": _build_result("conservative"),
+        "tradeoff": _build_result("tradeoff"),
+        "mixed": _build_result("mixed"),
+        "optimizer": {
+            "method": "Nelder-Mead",
+            "success": bool(res.success),
+            "message": str(res.message),
+            "n_evals": int(res.nfev),
+        }
+    }
+
+    # ---- optional YAML save ----
+    if save_yaml_path is not None:
+        with open(save_yaml_path, "w") as f:
+            yaml.dump(result_all, f, sort_keys=False)
+
+    return result_all
 
 
 def train_flowgen_model(

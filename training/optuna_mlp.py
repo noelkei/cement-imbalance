@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
+import joblib
+
 import numpy as np
 import pandas as pd
 import torch
@@ -16,6 +18,8 @@ from optuna.trial import Trial
 from training.train_mlp import train_mlp_pipeline
 from training.utils import ROOT_PATH
 from training.utils import load_scaled_sets, list_scaled_sets
+from losses.mlp_loss import _reduce_by_group
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -98,11 +102,11 @@ def resolve_device(requested: str = "cuda") -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 def suggest_mlp_params(trial: Trial) -> Dict[str, Any]:
    model = {
-       "embedding_dim": trial.suggest_int("embedding_dim", 6, 96, step=6),
-       "hidden_dim":    trial.suggest_int("hidden_dim", 64, 512, step=32),
-       "num_layers":    trial.suggest_int("num_layers", 1, 6),
-       "activation":    trial.suggest_categorical("activation", ["relu", "gelu", "silu", "elu"]),
-       "dropout":       trial.suggest_float("dropout", 0.0, 0.5),
+       "embedding_dim": trial.suggest_int("embedding_dim", 6, 64, step=6),
+       "hidden_dim":    trial.suggest_int("hidden_dim", 64, 384, step=32),
+       "num_layers":    trial.suggest_int("num_layers", 2, 6),
+       "activation":    trial.suggest_categorical("activation", ["relu", "gelu", "silu"]),
+       "dropout":       trial.suggest_float("dropout", 0.1, 0.4),
        "batchnorm":     trial.suggest_categorical("batchnorm", [False, True]),
        "use_weight_norm": trial.suggest_categorical("use_weight_norm", [True, False]),
        "residual":        trial.suggest_categorical("residual", [True, False]),
@@ -114,12 +118,12 @@ def suggest_mlp_params(trial: Trial) -> Dict[str, Any]:
 
    training = {
        "learning_rate": trial.suggest_float("learning_rate", 5e-5, 5e-3, log=True),
-       "batch_size":    trial.suggest_categorical("batch_size", [64, 128, 256, 512]),
+       "batch_size":    trial.suggest_categorical("batch_size", [66, 132, 198, 264]),
        "num_epochs":    trial.suggest_int("num_epochs", 60, 500, step=20),
 
 
        "optimizer":     trial.suggest_categorical("optimizer", ["adamw", "adam"]),
-       "weight_decay":  trial.suggest_float("weight_decay", 1e-8, 1e-2, log=True),
+       "weight_decay":  trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
        "betas":         [0.9, 0.999],
        "eps":           1e-8,
 
@@ -134,12 +138,11 @@ def suggest_mlp_params(trial: Trial) -> Dict[str, Any]:
 
 
        "early_stopping_patience": trial.suggest_int("early_stopping_patience", 20, 50),
-       "early_stop_min_delta": trial.suggest_float("early_stop_min_delta", 0.0, 5e-3),
+       "early_stop_min_delta": trial.suggest_float("early_stop_min_delta", 5e-4, 3e-3),
 
 
        "loss_reduction":"per_class_equal",
-       "regression_group_metric": trial.suggest_categorical("regression_group_metric", ["mse", "rmse", "rrmse"]),
-
+       "regression_group_metric": "rrmse",
 
        "save_model": False,
        "save_states": False,
@@ -361,8 +364,42 @@ def objective_mlp(
     if not (isinstance(model_or_tuple, tuple) and len(model_or_tuple) == 2):
         raise RuntimeError("train_mlp_pipeline must return (model, val_metrics).")
 
-    _, val_metrics = model_or_tuple
-    value = select_val_metric(val_metrics, metric_path)
+    model, _val_metrics = model_or_tuple
+
+    # --- load y scaler for THIS scaled set (needed to compute objective on real scale) ---
+    # We infer the set name from base_name_prefix which you set as: f"mlp_optuna__{scaled_set_name}"
+    # Example: "mlp_optuna__df_scaled_xrobust_yminmax"
+    scaled_set_name = None
+    if base_name_prefix.startswith("mlp_optuna__"):
+        scaled_set_name = base_name_prefix[len("mlp_optuna__"):]
+    if not scaled_set_name:
+        raise ValueError("Could not infer scaled_set_name. Ensure base_name_prefix = f'mlp_optuna__{scaled_set_name}'")
+
+    y_scaler_path = (
+            Path(ROOT_PATH)
+            / "data"
+            / "sets"
+            / "scaled_sets"
+            / scaled_set_name
+            / "scalers"
+            / f"{scaled_set_name}_y_scaler.pkl"
+    )
+    y_scaler = joblib.load(y_scaler_path)
+
+    # Use same reduction/metric config as training, but evaluated on REAL (inverse-scaled) targets
+    train_cfg = cfg.get("training", {})
+    value = compute_real_scale_objective_loss(
+        model=model,
+        X_val=X_val,
+        y_val=y_val,
+        condition_col=condition_col,
+        y_scaler=y_scaler,
+        reduction_mode=str(train_cfg.get("loss_reduction", "overall")),
+        regression_group_metric=str(train_cfg.get("regression_group_metric", "mse")),
+    )
+
+    trial.set_user_attr("model", model)
+
     trial.report(value, step=0)
     return float(value)
 
@@ -584,6 +621,56 @@ def run_mlp_study_pipeline(
         condition_col=condition_col,
     )
 
+    # ── compute & save REAL-scale metrics for best Optuna model ──
+    best_trial = study.best_trial
+    best_model = best_trial.user_attrs.get("model", None)
+
+    if best_model is not None:
+        y_scaler_path = (
+                Path(ROOT_PATH)
+                / "data"
+                / "sets"
+                / "scaled_sets"
+                / scaled_set_name
+                / "scalers"
+                / f"{scaled_set_name}_y_scaler.pkl"
+        )
+        y_scaler = joblib.load(y_scaler_path)
+
+        real_metrics = {
+            "train": compute_real_scale_metrics(
+                model=best_model,
+                X=X_train,
+                y=y_train,
+                condition_col=condition_col,
+                y_scaler=y_scaler,
+            ),
+            "val": compute_real_scale_metrics(
+                model=best_model,
+                X=X_val,
+                y=y_val,
+                condition_col=condition_col,
+                y_scaler=y_scaler,
+            ),
+            "test": compute_real_scale_metrics(
+                model=best_model,
+                X=X_test,
+                y=y_test,
+                condition_col=condition_col,
+                y_scaler=y_scaler,
+            ),
+        }
+
+        out_path = (
+                Path(ROOT_PATH)
+                / "outputs"
+                / "models"
+                / "mlp"
+                / f"{study_name}_results_real.yaml"
+        )
+        with open(out_path, "w") as f:
+            yaml.safe_dump(real_metrics, f, sort_keys=False)
+
     return study, best_params, best_value
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -613,3 +700,275 @@ def make_storage_path(study_name: str) -> str:
     base = Path(ROOT_PATH) / "outputs" / "models"/ "mlp" / "studies" / study_name
     base.mkdir(parents=True, exist_ok=True)
     return f"sqlite:///{base / 'study.db'}"
+
+def compute_real_scale_objective_loss(
+    *,
+    model,
+    X_val,
+    y_val,
+    condition_col: str,
+    y_scaler,
+    reduction_mode: str,
+    regression_group_metric: str,
+) -> float:
+    """
+    Same loss definition as mlp_loss, but computed on REAL (inverse-scaled) y.
+    Used ONLY for Optuna objective.
+    """
+
+    device = model.device
+    model.eval()
+
+    drop_cols = ["post_cleaning_index", condition_col]
+    if "is_synth" in X_val.columns:
+        drop_cols.append("is_synth")
+
+    x = torch.tensor(
+        X_val.drop(columns=drop_cols).values,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    c = torch.tensor(
+        X_val[condition_col].values,
+        dtype=torch.long,
+        device=device,
+    )
+    y_scaled = torch.tensor(
+        y_val.drop(columns=["post_cleaning_index"]).values,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    with torch.no_grad():
+        y_hat_scaled = model(x, c)
+
+    # ---- inverse scaling ----
+    y_hat_real = torch.tensor(
+        y_scaler.inverse_transform(y_hat_scaled.cpu().numpy()),
+        dtype=torch.float32,
+        device=device,
+    )
+    y_real = torch.tensor(
+        y_scaler.inverse_transform(y_scaled.cpu().numpy()),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    # ---- EXACT SAME BASE AS mlp_loss ----
+    mse_per_sample = torch.mean((y_hat_real - y_real) ** 2, dim=1)
+
+    if regression_group_metric == "mse":
+        loss = _reduce_by_group(
+            mse_per_sample, c,
+            mode=reduction_mode,
+            group_metric="mean",
+        )
+    elif regression_group_metric == "rmse":
+        loss = _reduce_by_group(
+            mse_per_sample, c,
+            mode=reduction_mode,
+            group_metric="rmse",
+        )
+    elif regression_group_metric == "rrmse":
+        loss = _reduce_by_group(
+            mse_per_sample, c,
+            mode=reduction_mode,
+            group_metric="rrmse",
+            y=y_real,
+        )
+    else:
+        raise ValueError(f"Unsupported regression_group_metric '{regression_group_metric}'")
+
+    return float(loss.detach().cpu())
+
+def compute_real_scale_metrics(
+    *,
+    model,
+    X: pd.DataFrame,
+    y: pd.DataFrame,
+    condition_col: str,
+    y_scaler,
+) -> dict:
+    """
+    Computes full regression metrics (overall, per-class, quantiles)
+    on REAL (inverse-scaled) y.
+    """
+
+    device = model.device
+    model.eval()
+
+    drop_cols = ["post_cleaning_index", condition_col]
+    if "is_synth" in X.columns:
+        drop_cols.append("is_synth")
+
+    x = torch.tensor(
+        X.drop(columns=drop_cols).values,
+        dtype=torch.float32,
+        device=device,
+    )
+    c = torch.tensor(
+        X[condition_col].values,
+        dtype=torch.long,
+        device=device,
+    )
+    y_scaled = torch.tensor(
+        y.drop(columns=["post_cleaning_index"]).values,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    with torch.no_grad():
+        y_hat_scaled = model(x, c)
+
+    # ---- inverse scaling ----
+    y_hat_real = torch.tensor(
+        y_scaler.inverse_transform(y_hat_scaled.cpu().numpy()),
+        dtype=torch.float32,
+        device=device,
+    )
+    y_real = torch.tensor(
+        y_scaler.inverse_transform(y_scaled.cpu().numpy()),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    return compute_regression_metrics_from_preds(
+        y_hat=y_hat_real,
+        y=y_real,
+        c=c,
+    )
+
+
+def compute_regression_metrics_from_preds(
+    *,
+    y_hat: torch.Tensor,
+    y: torch.Tensor,
+    c: torch.Tensor,
+) -> dict:
+    """
+    Computes full regression metrics (overall, per-class, quantiles)
+    assuming y_hat and y are on the SAME scale.
+    """
+
+    quantile_ranges = {
+        "0_50": (0.0, 0.5),
+        "0_75": (0.0, 0.75),
+        "25_75": (0.25, 0.75),
+        "10_90": (0.10, 0.90),
+        "5_95": (0.05, 0.95),
+        "90_100": (0.90, 1.0),
+    }
+
+    def _quantile_metrics(err, y):
+        abs_err = torch.abs(err)
+        out = {}
+
+        for qname, (qlo, qhi) in quantile_ranges.items():
+            lo = torch.quantile(abs_err, qlo)
+            hi = torch.quantile(abs_err, qhi)
+
+            m = (abs_err >= lo) & (abs_err <= hi)
+            if not torch.any(m):
+                continue
+
+            e = err[m]
+            yt = y[m]
+
+            mse = float(torch.mean(e ** 2))
+            rmse = float(torch.sqrt(torch.mean(e ** 2) + 1e-12))
+            rrmse = float(
+                (torch.sqrt(torch.mean(e ** 2)) /
+                 (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
+            )
+            mae = float(torch.mean(torch.abs(e)))
+            medae = float(torch.median(torch.abs(e)))
+            mape = float(torch.mean(torch.abs(e) / torch.clamp(torch.abs(yt), min=1e-8)).item())
+
+            yt_mu = yt.mean(dim=0)
+            ss_res = torch.sum((yt - (yt - e)) ** 2)
+            ss_tot = torch.sum((yt - yt_mu) ** 2)
+            r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
+
+            out[qname] = {
+                "mse": mse,
+                "rmse": rmse,
+                "rrmse": rrmse,
+                "mae": mae,
+                "medae": medae,
+                "mape": mape,
+                "r2": r2,
+                "n": int(m.sum().item()),
+            }
+
+        return out
+
+    err = y_hat - y
+
+    mse = float(torch.mean(err ** 2))
+    rmse = float(torch.sqrt(torch.tensor(mse) + 1e-12))
+    rrmse = float(
+        (torch.sqrt(torch.mean(err ** 2)) /
+         (torch.sqrt(torch.mean(y ** 2)) + 1e-12)).item()
+    )
+    mae = float(torch.mean(torch.abs(err)))
+    medae = float(torch.median(torch.abs(err)))
+    mape = float(torch.mean(torch.abs(err) / torch.clamp(torch.abs(y), min=1e-8)).item())
+
+    y_mu = y.mean(dim=0)
+    ss_res = torch.sum((y - y_hat) ** 2)
+    ss_tot = torch.sum((y - y_mu) ** 2)
+    r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
+
+    quantiles_overall = _quantile_metrics(err, y)
+
+    out_pc = {}
+    for cls in torch.unique(c):
+        m = (c == cls)
+        if not torch.any(m):
+            continue
+
+        yh = y_hat[m]
+        yt = y[m]
+        e = yh - yt
+
+        mse_c = float(torch.mean(e ** 2))
+        rmse_c = float(torch.sqrt(torch.mean(e ** 2) + 1e-12))
+        rrmse_c = float(
+            (torch.sqrt(torch.mean(e ** 2)) /
+             (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
+        )
+        mae_c = float(torch.mean(torch.abs(e)))
+        medae_c = float(torch.median(torch.abs(e)))
+        mape_c = float(torch.mean(torch.abs(e) / torch.clamp(torch.abs(yt), min=1e-8)).item())
+
+        yt_mu = yt.mean(dim=0)
+        ss_res_c = torch.sum((yt - yh) ** 2)
+        ss_tot_c = torch.sum((yt - yt_mu) ** 2)
+        r2_c = float(1.0 - ss_res_c / (ss_tot_c + 1e-12))
+
+        out_pc[int(cls.item())] = {
+            "mse": mse_c,
+            "rmse": rmse_c,
+            "rrmse": rrmse_c,
+            "mae": mae_c,
+            "medae": medae_c,
+            "mape": mape_c,
+            "r2": r2_c,
+            "n": int(m.sum().item()),
+            "quantiles": _quantile_metrics(e, yt),
+        }
+
+    return {
+        "overall": {
+            "mse": mse,
+            "rmse": rmse,
+            "rrmse": rrmse,
+            "mae": mae,
+            "medae": medae,
+            "mape": mape,
+            "r2": r2,
+            "quantiles": quantiles_overall,
+        },
+        "per_class": out_pc,
+    }
