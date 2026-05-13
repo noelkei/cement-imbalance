@@ -1,2 +1,29 @@
-# Project exclude paths
+# Local environments
 /.venv/
+/.idea/
+/.agents/
+/notebooks/
+/TFG/
+
+# System files and Python cache
+.DS_Store
+__pycache__/
+*.py[cod]
+*.ipynb_checkpoints/
+
+# Local/private config overlays
+/config/local/
+
+# Local-only data and generated artifacts
+/data/raw/
+/data/processed/
+/data/cleaned/
+/data/splits/
+/data/sets/
+/outputs/
+
+# Local databases, logs, and caches
+*.db
+*.sqlite
+*.sqlite3
+*.log
