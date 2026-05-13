@@ -1,0 +1,107 @@
+contract:
+  id: "closure_contract_v1"
+  split_id: "init_temporal_processed_v1"
+  raw_bundle_dataset_name: "df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1"
+  raw_bundle_manifest: "data/sets/official/init_temporal_processed_v1/raw/df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1/manifest.json"
+  cleaning_policy_id: "trainfit_overlap_cap1pct_holdoutflag_v1"
+  dataset_contract_id: "f5_dataset_contract_v1"
+  supported_space_statuses:
+    - "supported_space"
+    - "materialized_now"
+    - "blocked_by_upstream"
+    - "future_supported"
+    - "out_of_scope"
+
+dataset_level_axes:
+  notes:
+    - "Only dataset-level axes change persisted train rows."
+    - "Synthetic policies are train-only and cannot modify val/test."
+    - "FlowPre closure enables flowpre_rrmse / flowpre_mvn / flowpre_fair as specialized scalers and flowpre_candidate_1 / flowpre_candidate_2 as FlowGen work bases."
+  x_transform:
+    implemented_now:
+      - "standard"
+      - "robust"
+      - "quantile"
+    enabled_by_f5a:
+      - "minmax"
+    enabled_by_flowpre_closure:
+      - "flowpre_rrmse"
+      - "flowpre_mvn"
+      - "flowpre_fair"
+      - "flowpre_candidate_1"
+      - "flowpre_candidate_2"
+  y_transform:
+    implemented_now:
+      - "standard"
+      - "robust"
+      - "minmax"
+      - "quantile"
+  synthetic_policy:
+    implemented_now:
+      - "none"
+      - "kmeans_smote"
+    blocked_by_upstream:
+      - "flowgen"
+    notes:
+      - "flowgen synthetic_policy is defined over flowpre_candidate_1 / flowpre_candidate_2 and remains blocked until a promoted FlowGen upstream exists for the selected work base."
+      - "kmeans_smote is implemented as a train-only dataset-level augmenter over canonical non-synthetic source bundles and preserves val/test from the source bundle."
+    invariants:
+      - "train-only"
+      - "requires synthetic_policy_id"
+      - "requires is_synth"
+      - "requires source manifests"
+      - "requires counts_by_split"
+      - "requires counts_by_class"
+
+run_level_axes:
+  notes:
+    - "Run-level axes change training behavior without creating a new dataset."
+    - "The same canonical dataset may be executed under multiple run-level variants."
+  batch_policy:
+    status: "implemented_now"
+    source: "training.training.dataloader_mode"
+    values:
+      - "baseline"
+      - "balanced"
+  cycling_policy:
+    status: "implemented_now"
+    source: "training.training.cycle_reals"
+    values:
+      - true
+      - false
+  loss_policy:
+    status: "implemented_now"
+    source:
+      loss_reduction: "training.training.loss_reduction"
+      regression_group_metric: "training.training.regression_group_metric"
+    values:
+      loss_reduction:
+        - "overall"
+        - "per_class_equal"
+        - "per_class_weighted"
+      regression_group_metric:
+        - "mse"
+        - "rmse"
+        - "rrmse"
+  objective_metric:
+    status: "implemented_now_post_run_only"
+    implemented_now_scope: "post_run_selection"
+    trainer_early_stopping_metric: "val_loss"
+    future_supported_scope: "trainer_native_objective_metric"
+    default_id: "raw_real.macro.rrmse"
+    tie_breakers:
+      - "raw_real.worst_class.rrmse"
+      - "raw_real.overall.rrmse"
+  allow_synth:
+    status: "implemented_now"
+    source: "training.training.allow_synth"
+    default_frozen_in_base_config: true
+
+mlp_closure:
+  base_config_id: "mlp_closure_base_v1"
+  base_config_path: "config/mlp_closure_base_v1.yaml"
+  seed_set_id: "closure_5x_v1"
+  seeds: [1234, 2345, 3456, 4567, 5678]
+  objective_metric_id: "raw_real.macro.rrmse"
+  allow_test_holdout_default: false
+  optuna_canonical: false

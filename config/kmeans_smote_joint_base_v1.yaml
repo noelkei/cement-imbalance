@@ -1,0 +1,34 @@
+contract:
+  synthetic_policy_config_id: "kmeans_smote_joint_base_v1"
+  synthetic_policy_family: "kmeans_smote_joint"
+  dataset_contract_id: "f5_dataset_contract_v1"
+
+policy:
+  synthetic_seed: 42
+  condition_col: "type"
+
+  target_policy:
+    mode: "train_majority"
+    value: null
+
+  metric_space:
+    mode: "robust"
+
+  clustering:
+    k_mode: "silhouette_auto"
+    k_fixed: null
+    k_max: 12
+    min_cluster_size: 8
+    silhouette_sample_size: 5000
+    silhouette_min_accept: 0.02
+    silhouette_tol: 1.0e-4
+
+  neighbors:
+    k_mode: "auto"
+    k_value: null
+    k_max: 5
+
+  sampling:
+    lambda_distribution: "uniform"
+    redistribute_singletons: true
+    error_if_no_eligible_cluster: true

@@ -1,0 +1,20 @@
+source:
+  raw_filename: public_raw_dataset.csv
+  read_csv:
+    sep: ";"
+    engine: python
+  columns:
+    type: public_type
+    process: public_process
+  filters:
+    allowed_types:
+      - public_type_a
+      - public_type_b
+      - public_type_c
+    allowed_processes:
+      - public_process_a
+      - public_process_b
+  remove_columns_after_mapping:
+    - public_drop_feature_01
+    - public_drop_feature_02
+    - public_drop_feature_03

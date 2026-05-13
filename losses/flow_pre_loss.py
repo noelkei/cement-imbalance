@@ -2,6 +2,15 @@ import math
 import torch
 from scipy.stats import skew, kurtosis
 
+
+def _scalar_zero(reference: torch.Tensor) -> torch.Tensor:
+    return reference.new_zeros(())
+
+
+def _to_reference_tensor(value, reference: torch.Tensor) -> torch.Tensor:
+    return torch.as_tensor(value, device=reference.device, dtype=reference.dtype)
+
+
 def flexible_flow_loss_from_model(
     model,
     batch_x,
@@ -52,7 +61,7 @@ def flexible_flow_loss_from_model(
     else:
         logabsdet_clamped = logabsdet
 
-    total_loss = 0.0
+    total_loss = _scalar_zero(z)
     diagnostics = {}
 
     if use_nll:
@@ -67,8 +76,8 @@ def flexible_flow_loss_from_model(
         else:
             reg_weight = logdet_penalty_weight
 
-        loss_logdet_abs = logabsdet_clamped.abs().mean() if use_logdet_abs else 0.0
-        loss_logdet_sq = logabsdet_clamped.pow(2).mean() if use_logdet_sq else 0.0
+        loss_logdet_abs = logabsdet_clamped.abs().mean() if use_logdet_abs else _scalar_zero(z)
+        loss_logdet_sq = logabsdet_clamped.pow(2).mean() if use_logdet_sq else _scalar_zero(z)
         loss_logdet = reg_weight * (loss_logdet_abs + loss_logdet_sq)
         total_loss += loss_logdet
 
@@ -82,7 +91,7 @@ def flexible_flow_loss_from_model(
     if use_logpz_centering:
         if logpz_target is None:
             logpz_target = -0.5 * input_dim * (1 + math.log(2 * math.pi))
-        delta_logpz = logpz - logpz_target
+        delta_logpz = logpz - _to_reference_tensor(logpz_target, logpz)
         logpz_abs = delta_logpz.abs().mean()
         logpz_sq = delta_logpz.pow(2).mean()
         logpz_penalty = logpz_centering_weight * (logpz_abs + logpz_sq)
@@ -102,8 +111,8 @@ def flexible_flow_loss_from_model(
         reference_scale = logpz.abs().mean().detach().clamp(min=1.0)
 
     if use_mean_penalty:
-        mean_abs = z_mean.abs().mean() if use_mean_abs else 0.0
-        mean_sq = z_mean.pow(2).mean() if use_mean_sq else 0.0
+        mean_abs = z_mean.abs().mean() if use_mean_abs else _scalar_zero(z)
+        mean_sq = z_mean.pow(2).mean() if use_mean_sq else _scalar_zero(z)
         mean_reg_weight = mean_penalty_weight * reference_scale
         mean_penalty = mean_reg_weight * (mean_abs + mean_sq)
         total_loss += mean_penalty
@@ -117,8 +126,8 @@ def flexible_flow_loss_from_model(
 
     if use_std_penalty:
         delta_std = z_std - 1.0
-        std_abs = delta_std.abs().mean() if use_std_abs else 0.0
-        std_sq = delta_std.pow(2).mean() if use_std_sq else 0.0
+        std_abs = delta_std.abs().mean() if use_std_abs else _scalar_zero(z)
+        std_sq = delta_std.pow(2).mean() if use_std_sq else _scalar_zero(z)
         std_reg_weight = std_penalty_weight * reference_scale
         std_penalty = std_reg_weight * (std_abs + std_sq)
         total_loss += std_penalty
@@ -131,18 +140,17 @@ def flexible_flow_loss_from_model(
         })
 
     if use_skew_penalty or use_kurtosis_penalty:
-        from scipy.stats import skew, kurtosis
-
-        z_np = z.detach().cpu().numpy()
-        skew_vec = torch.tensor(skew(z_np, axis=0), device=z.device)
-        kurt_vec = torch.tensor(kurtosis(z_np, axis=0, fisher=False), device=z.device)  # Normal kurtosis = 3
+        # SciPy returns NumPy float64 by default; cast back to z's dtype/device before combining.
+        z_np = z.detach().to(device="cpu", dtype=torch.float32).numpy()
+        skew_vec = _to_reference_tensor(skew(z_np, axis=0), z)
+        kurt_vec = _to_reference_tensor(kurtosis(z_np, axis=0, fisher=False), z)  # Normal kurtosis = 3
 
     if use_skew_penalty:
         delta_skew = skew_vec  # Target = 0
-        skew_abs = delta_skew.abs() if use_skew_abs else 0.0
-        skew_sq = delta_skew.pow(2) if use_skew_sq else 0.0
+        skew_abs = delta_skew.abs() if use_skew_abs else _scalar_zero(z)
+        skew_sq = delta_skew.pow(2) if use_skew_sq else _scalar_zero(z)
 
-        skew_component = 0.0
+        skew_component = _scalar_zero(z)
         if use_skew_abs:
             skew_component += skew_abs.sum()
         if use_skew_sq:
@@ -161,10 +169,10 @@ def flexible_flow_loss_from_model(
 
     if use_kurtosis_penalty:
         delta_kurt = kurt_vec - 3.0  # Target = 3
-        kurt_abs = delta_kurt.abs() if use_kurtosis_abs else 0.0
-        kurt_sq = delta_kurt.pow(2) if use_kurtosis_sq else 0.0
+        kurt_abs = delta_kurt.abs() if use_kurtosis_abs else _scalar_zero(z)
+        kurt_sq = delta_kurt.pow(2) if use_kurtosis_sq else _scalar_zero(z)
 
-        kurt_component = 0.0
+        kurt_component = _scalar_zero(z)
         if use_kurtosis_abs:
             kurt_component += kurt_abs.sum()
         if use_kurtosis_sq:

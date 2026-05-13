@@ -1,4 +1,5 @@
 # === train_flowgen.py (first part) ===
+import gc
 import os, random, secrets, math, json, shutil, re
 from copy import deepcopy
 from pathlib import Path
@@ -9,7 +10,6 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from scipy.stats import skew, kurtosis, chi2, kstest
 import yaml
 
 import time
@@ -18,9 +18,8 @@ from scipy.optimize import minimize
 
 from models.flowgen import FlowGen
 from losses.flowgen_loss import (
-    flowgen_loss, _ks_w1_matrix, _mmd_rbf_biased, _pearson_corr, _spearman_corr, _fro_rel, EPS, _iqr,
+    flowgen_loss, _ks_w1_matrix, _mmd_rbf_biased, _pearson_corr, _spearman_corr, _fro_rel, _iqr,
     # NEW: joint + XY-block helpers used by eval
-    _mmd_joint_xy_ms,                 # optional (not strictly needed if you keep RvS/RvR)
     _pearson_xyblock_fro_gap,         # XY Pearson Fro gap (abs/rel)
     _softspearman_xyblock_fro_gap,    # differentiable Spearman XY Fro gap (abs/rel)
 )
@@ -32,8 +31,35 @@ from training.utils import (
     setup_training_logs_and_dirs,
     log_epoch_diagnostics,
 )
-from data.sets import load_or_create_raw_splits
+from data.sets import (
+    DEFAULT_OFFICIAL_DATASET_NAME,
+    load_or_create_raw_splits,
+    official_raw_bundle_manifest_path,
+)
 from nflows.distributions.normal import StandardNormal
+from evaluation.metrics import (
+    compute_flowgen_iso_rrmse_per_class as _canonical_compute_flowgen_iso_rrmse_per_class,
+    compute_flowgen_latent_isotropy_stats as _canonical_compute_flowgen_latent_isotropy_stats,
+    compute_flowgen_latent_isotropy_stats_per_class as _canonical_compute_flowgen_latent_isotropy_stats_per_class,
+    compute_flowgen_split_metrics,
+    format_iso_dict as _canonical_format_iso_dict,
+    latent_isotropy_stats_from_z as _canonical_latent_isotropy_stats_from_z,
+)
+from evaluation.realism import compute_realism_metrics_for_set as _canonical_compute_realism_metrics_for_set
+from evaluation.results import build_run_context, save_canonical_run_artifacts
+from training.monitoring import (
+    OFFICIAL_VAL_POLICY,
+    TRAIN_ONLY_POLICY,
+    ensure_holdout_policy,
+    experimental_output_namespace,
+    normalize_monitoring_policy,
+    with_monitoring_context,
+)
+from evaluation.temporal_realism import (
+    build_temporal_realism_block,
+    resolve_temporal_realism_config,
+    write_temporal_realism_sidecars,
+)
 
 # --- Device selection helper (MPS → CUDA → CPU) ---
 def select_device(prefer: str | None = None) -> torch.device:
@@ -66,72 +92,15 @@ def select_device(prefer: str | None = None) -> torch.device:
 # Latent diagnostics (unchanged math; now driven by FlowGen.forward_xy)
 # ───────────────────────────────────────────────────────────────────────────────
 def _latent_isotropy_stats_from_z(z_np: np.ndarray) -> dict:
-    """
-    Diagnostics on latent matrix z (N, D):
-      - skewness_mean: mean |skew| across dims (target 0)
-      - kurtosis_mean: mean Pearson kurtosis across dims (target ~3)
-      - mahalanobis_mean/median: on distances
-      - mahalanobis_ks_p: KS p-value of d^2 vs ChiSquare(D)
-      - eigval_std: std of covariance eigenvalues (lower ~ more isotropic)
-    """
-    N, D = z_np.shape
-    sk = skew(z_np, axis=0, bias=False)                     # target ~ 0
-    ku = kurtosis(z_np, axis=0, fisher=False, bias=False)   # target ~ 3 (Pearson)
-
-    skewness_mean = float(np.mean(np.abs(sk)))
-    kurtosis_mean = float(np.mean(ku))
-
-    cov = np.cov(z_np, rowvar=False)
-    eps = 1e-6
-    cov_reg = cov + eps * np.eye(cov.shape[0], dtype=cov.dtype)
-    evals = np.linalg.eigvalsh(cov_reg)
-    eigval_std = float(np.std(evals))
-
-    mu = z_np.mean(axis=0, keepdims=True)
-    w, V = np.linalg.eigh(cov_reg)
-    w_inv_sqrt = np.diag(1.0 / np.sqrt(w))
-    z_whitened = (z_np - mu) @ V @ w_inv_sqrt
-    d2 = np.sum(z_whitened**2, axis=1)
-    d = np.sqrt(d2)
-
-    mahalanobis_mean = float(np.mean(d))
-    mahalanobis_median = float(np.median(d))
-    ks_stat, ks_p = kstest(d2, chi2(df=D).cdf)
-    mahalanobis_ks_p = float(ks_p)
-
-    return {
-        "skewness_mean": skewness_mean,
-        "kurtosis_mean": kurtosis_mean,
-        "mahalanobis_mean": mahalanobis_mean,
-        "mahalanobis_median": mahalanobis_median,
-        "mahalanobis_ks_p": mahalanobis_ks_p,
-        "eigval_std": eigval_std,
-    }
+    return _canonical_latent_isotropy_stats_from_z(z_np)
 
 
 def _latent_isotropy_stats(model: FlowGen, x: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> dict:
-    """Use FlowGen.forward_xy(x, y, c) to get z, then compute whole-set diagnostics."""
-    model.eval()
-    with torch.no_grad():
-        z, _ = model.forward_xy(x, y, c)
-    return _latent_isotropy_stats_from_z(z.detach().cpu().numpy())
+    return _canonical_compute_flowgen_latent_isotropy_stats(model, x, y, c)
 
 
 def _latent_isotropy_stats_per_class(model: FlowGen, x: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> dict[int, dict]:
-    """Per-class diagnostics with sample counts (uses FlowGen.forward_xy)."""
-    model.eval()
-    out = {}
-    with torch.no_grad():
-        for cls in torch.unique(c):
-            m = (c == cls)
-            if not m.any():
-                continue
-            z, _ = model.forward_xy(x[m], y[m], c[m])
-            stats = _latent_isotropy_stats_from_z(z.detach().cpu().numpy())
-            stats["n"] = int(m.sum().item())
-            out[int(cls.item())] = {k: (float(v) if isinstance(v, (np.floating,)) else v)
-                                    for k, v in stats.items()}
-    return out
+    return _canonical_compute_flowgen_latent_isotropy_stats_per_class(model, x, y, c)
 
 
 # --- Helper: compute per-class isotropy RRMSE (from loss function outputs) ---
@@ -142,31 +111,7 @@ def _iso_rrmse_per_class_from_loss(
     c: torch.Tensor,
     loss_kwargs: dict,
 ):
-    """
-    For each class label in c, run flowgen_loss on the subset and collect
-    RRMSE summaries for X and Y separately.
-
-    NEW EXPECTED flowgen_loss RETURNS:
-        loss, diagnostics, rrmse_x_mean, rrmse_x_std, rrmse_y_mean, rrmse_y_std
-    """
-    model.eval()
-    per_class = {}
-    with torch.no_grad():
-        for cls in torch.unique(c):
-            m = (c == cls)
-            if not m.any():
-                continue
-            _, _, rmx, rxs, rmy, rys = flowgen_loss(
-                model, x[m], y[m], c[m], epoch=0, batch_index=0, **dict(loss_kwargs or {})
-            )
-            per_class[int(cls.item())] = {
-                "rrmse_x_mean": round(float(rmx), 6),
-                "rrmse_x_std":  round(float(rxs), 6),
-                "rrmse_y_mean": round(float(rmy), 6),
-                "rrmse_y_std":  round(float(rys), 6),
-                "n": int(m.sum().item()),
-            }
-    return per_class
+    return _canonical_compute_flowgen_iso_rrmse_per_class(model, x, y, c, loss_kwargs)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -174,36 +119,7 @@ def _iso_rrmse_per_class_from_loss(
 # ───────────────────────────────────────────────────────────────────────────────
 
 def _format_iso_dict(iso_dict: Dict[int, Dict]) -> str:
-    """
-    Accepts entries like:
-      { cls: {
-          'rrmse_x_mean', 'rrmse_x_std',
-          'rrmse_y_mean', 'rrmse_y_std',
-          'n', ...
-        }, ... }
-
-    Falls back to legacy keys ('rrmse_mean', 'rrmse_std') if present.
-    Returns a concise stringified dict.
-    """
-    compact = {}
-    for cls, vals in iso_dict.items():
-        if all(k in vals for k in ("rrmse_x_mean", "rrmse_x_std", "rrmse_y_mean", "rrmse_y_std")):
-            compact[cls] = (
-                float(vals["rrmse_x_mean"]),
-                float(vals["rrmse_x_std"]),
-                float(vals["rrmse_y_mean"]),
-                float(vals["rrmse_y_std"]),
-                int(vals.get("n", 0)),
-            )
-        elif all(k in vals for k in ("rrmse_mean", "rrmse_std")):
-            compact[cls] = (
-                float(vals["rrmse_mean"]),
-                float(vals["rrmse_std"]),
-                int(vals.get("n", 0)),
-            )
-        else:
-            compact[cls] = {"n": int(vals.get("n", 0))}
-    return str(compact)
+    return _canonical_format_iso_dict(iso_dict)
 
 
 
@@ -490,6 +406,27 @@ def _maybe_set_seed(seed: int | None) -> int:
     return int(seed)
 
 
+def _state_dict_to_cpu(state_dict: dict) -> dict:
+    cpu_state: dict = {}
+    for key, value in state_dict.items():
+        if torch.is_tensor(value):
+            cpu_state[key] = value.detach().cpu().clone()
+        else:
+            cpu_state[key] = deepcopy(value)
+    return cpu_state
+
+
+def _release_training_memory() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+
+
 def _loss_kwargs_from_train_cfg(train_cfg: dict) -> dict:
     """
     Map legacy training config keys to flowgen_loss(...) kwargs.
@@ -651,376 +588,15 @@ def compute_realism_metrics_for_set(
     device: torch.device,
     seed: int | None = None,
 ) -> dict:
-    """
-    Full-set realism metrics using ALL reference data, averaged over bootstrap replicates.
-    For each replicate:
-      • sample per-class synthetic with counts == full real per-class counts,
-      • compute KS/W1 (normalized), Pearson/Spearman Fro (abs/rel), and MMD² ratio
-        for overall | X | y and per-class,
-      • RvR median uses the same σ as the replicate's RvS to keep ratios fair.
-    All knobs come from loss_like_kwargs via .get(...).
-    """
-
-    def _finite_and_clamp_to_real(xr_c, yr_c, xs_c, ys_c):
-        # drop non-finite synth rows
-        finite = torch.isfinite(xs_c).all(dim=1) & torch.isfinite(ys_c).all(dim=1)
-        xs_c = xs_c[finite];
-        ys_c = ys_c[finite]
-
-        # robust per-class bounds from REAL (5 * IQR)
-        q25x = xr_c.quantile(0.25, dim=0);
-        q75x = xr_c.quantile(0.75, dim=0)
-        iqr_x = (q75x - q25x).clamp_min(1e-6)
-        lo_x = q25x - 5.0 * iqr_x;
-        hi_x = q75x + 5.0 * iqr_x
-
-        q25y = yr_c.quantile(0.25, dim=0);
-        q75y = yr_c.quantile(0.75, dim=0)
-        iqr_y = (q75y - q25y).clamp_min(1e-6)
-        lo_y = q25y - 5.0 * iqr_y;
-        hi_y = q75y + 5.0 * iqr_y
-
-        # clamp synth to real support
-        xs_c = xs_c.clamp(min=lo_x, max=hi_x)
-        ys_c = ys_c.clamp(min=lo_y, max=hi_y)
-        return xs_c, ys_c
-
-    model.eval()
-    # ---- RNG (tunable offset) ----
-    gen_cpu = torch.Generator(device="cpu")
-    if seed is not None:
-        gen_cpu.manual_seed(int(seed) + int(loss_like_kwargs.get("realism_seed_offset", 0)))
-
-    with torch.no_grad():
-        Dx = int(x_ref.shape[1]); Dy = int(y_ref.shape[1]); Dxy = Dx + Dy
-
-        # ---- eval knobs (all tunable) ----
-        boots       = int(loss_like_kwargs.get("realism_bootstrap", 10))  # number of RvS replicates (averaged)
-        rvr_boots   = int(loss_like_kwargs.get("realism_rvr_bootstrap", boots))  # RvR median bootstraps per replicate
-
-        ks_grid_x   = int(loss_like_kwargs.get("ks_grid_points_x", 64))
-        ks_tau_x    = float(loss_like_kwargs.get("ks_tau_x", 0.05))
-        w1_norm_x   = str(loss_like_kwargs.get("w1_x_norm", "iqr"))
-
-        ks_grid_y   = int(loss_like_kwargs.get("ks_grid_points_y", 64))
-        ks_tau_y    = float(loss_like_kwargs.get("ks_tau_y", 0.05))
-        w1_norm_y   = str(loss_like_kwargs.get("w1_y_norm", "iqr"))
-
-        ks_grid_all = int(loss_like_kwargs.get("ks_grid_points_all", max(ks_grid_x, ks_grid_y)))
-        ks_tau_all  = float(loss_like_kwargs.get("ks_tau_all", 0.5 * (ks_tau_x + ks_tau_y)))
-        w1_norm_all = str(loss_like_kwargs.get("w1_norm_all", "iqr"))
-
-        # ---- full real per-class pools (no subsampling) ----
-        classes = [int(ci) for ci in torch.unique(c_ref).tolist()]
-        counts = {cls: int((c_ref == cls).sum().item()) for cls in classes}
-
-        real_x_by_cls = {cls: x_ref[c_ref == cls] for cls in classes}
-        real_y_by_cls = {cls: y_ref[c_ref == cls] for cls in classes}
-
-        Xr_all = torch.cat([real_x_by_cls[cls] for cls in classes], dim=0)
-        Yr_all = torch.cat([real_y_by_cls[cls] for cls in classes], dim=0)
-
-        real_all_cat = torch.cat([Xr_all, Yr_all], dim=1)
-
-        # --- global denominators (from full real pools; fixed across reps/classes) ---
-        denom_all_global = _iqr(real_all_cat).to(torch.float32).clamp_min(1e-4)
-        denom_x_global = _iqr(Xr_all).to(torch.float32).clamp_min(1e-4)
-        denom_y_global = _iqr(Yr_all).to(torch.float32).clamp_min(1e-4)
-
-        # ---- accumulator helpers (no nested defs) ----
-        def _empty_suite(include_corr: bool) -> Dict[str, Optional[float]]:
-            base = {
-                "ks_mean": 0.0, "ks_median": 0.0,
-                "w1_mean": 0.0, "w1_median": 0.0,
-                "mmd2_rvs": 0.0, "mmd2_rvr_med": 0.0, "mmd2_ratio": 0.0,
-                # NEW: XY block corr (filled only for “overall”; kept here for shape consistency)
-                "xy_pearson_fro": 0.0, "xy_pearson_fro_rel": 0.0,
-                "xy_spearman_fro": 0.0, "xy_spearman_fro_rel": 0.0,
-                "_xycorr_count": 0,
-            }
-            if include_corr:
-                base.update({
-                    "pearson_fro": 0.0, "pearson_fro_rel": 0.0,
-                    "spearman_fro": 0.0, "spearman_fro_rel": 0.0,
-                    "_corr_count": 0,
-                })
-            return base
-
-        overall_acc = _empty_suite(include_corr=False)
-        x_acc       = _empty_suite(include_corr=True)
-        y_acc       = _empty_suite(include_corr=True)
-        per_class_acc: Dict[int, Dict[str, Dict[str, Optional[float]]]] = {
-            cls: {
-                "overall": _empty_suite(include_corr=False),
-                "x": _empty_suite(include_corr=True),
-                "y": _empty_suite(include_corr=True),
-            } for cls in counts.keys()
-        }
-
-        # ======================================================
-        # Replicates: generate full-size synthetic and evaluate
-        # ======================================================
-        for _rep in range(boots):
-            # ---- generate synthetic per class with FULL real counts ----
-            synth_x_by_cls: Dict[int, torch.Tensor] = {}
-            synth_y_by_cls: Dict[int, torch.Tensor] = {}
-            for cls, n_real in counts.items():
-                ns = int(n_real)
-                if ns <= 0:
-                    # keep empty tensors if class absent (safety)
-                    synth_x_by_cls[cls] = real_x_by_cls[cls].new_zeros((0, Dx))
-                    synth_y_by_cls[cls] = real_y_by_cls[cls].new_zeros((0, Dy))
-                    continue
-                z_s = torch.randn(ns, Dxy, generator=gen_cpu, device="cpu").to(device)
-                c_s = torch.full((ns,), cls, dtype=torch.long, device=device)
-                (xs_c, ys_c), _ = model.inverse_xy(z_s, c_s)
-                xs_c, ys_c = _finite_and_clamp_to_real(real_x_by_cls[cls], real_y_by_cls[cls], xs_c, ys_c)
-                synth_x_by_cls[cls] = xs_c
-                synth_y_by_cls[cls] = ys_c
-
-            Xs_all = torch.cat([synth_x_by_cls[cls] for cls in counts.keys()], dim=0)
-            Ys_all = torch.cat([synth_y_by_cls[cls] for cls in counts.keys()], dim=0)
-            synth_all_cat = torch.cat([Xs_all, Ys_all], dim=1)
-
-            # ---------- helper to compute RvR median with fixed sigma ----------
-            def _mmd_rvr_median(real_mat: torch.Tensor, sigma: float, n_draws: int) -> float:
-                n = real_mat.size(0)
-                # draw with replacement, size = n each time (MPS-safe: sample on CPU)
-                vals = []
-                for _ in range(n_draws):
-                    idx1 = torch.randint(0, n, (n,), generator=gen_cpu, device="cpu").to(device)
-                    idx2 = torch.randint(0, n, (n,), generator=gen_cpu, device="cpu").to(device)
-                    r1 = real_mat.index_select(0, idx1)
-                    r2 = real_mat.index_select(0, idx2)
-                    m2, _ = _mmd_rbf_biased(r1, r2, sigma=sigma)
-                    vals.append(float(m2.detach()))
-                return float(torch.tensor(vals, device=device).median().detach())
-
-            # ===================== overall =====================
-            ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
-                real_all_cat, synth_all_cat,
-                grid_points=ks_grid_all, tau=ks_tau_all, norm=w1_norm_all,
-                denom_override=denom_all_global
-            )
-            mmd2_rvs_all, sigma_all = _mmd_rbf_biased(real_all_cat, synth_all_cat)
-            mmd2_rvr_med_all = _mmd_rvr_median(real_all_cat, sigma_all, rvr_boots)
-            overall_acc["ks_mean"]      += float(ks_mean.detach())
-            overall_acc["ks_median"]    += float(ks_med.detach())
-            overall_acc["w1_mean"]      += float(w1_mean.detach())
-            overall_acc["w1_median"]    += float(w1_med.detach())
-            overall_acc["mmd2_rvs"]     += float(mmd2_rvs_all.detach())
-            overall_acc["mmd2_rvr_med"] += float(mmd2_rvr_med_all)
-            overall_acc["mmd2_ratio"]   += float((mmd2_rvs_all / (mmd2_rvr_med_all + EPS)).detach())
-
-            # ===================== X-only =====================
-            ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
-                Xr_all, Xs_all,
-                grid_points=ks_grid_x, tau=ks_tau_x, norm=w1_norm_x,
-                denom_override=denom_x_global
-            )
-            mmd2_rvs_x, sigma_x = _mmd_rbf_biased(Xr_all, Xs_all)
-            mmd2_rvr_med_x = _mmd_rvr_median(Xr_all, sigma_x, rvr_boots)
-            x_acc["ks_mean"]      += float(ks_mean.detach())
-            x_acc["ks_median"]    += float(ks_med.detach())
-            x_acc["w1_mean"]      += float(w1_mean.detach())
-            x_acc["w1_median"]    += float(w1_med.detach())
-            x_acc["mmd2_rvs"]     += float(mmd2_rvs_x.detach())
-            x_acc["mmd2_rvr_med"] += float(mmd2_rvr_med_x)
-            x_acc["mmd2_ratio"]   += float((mmd2_rvs_x / (mmd2_rvr_med_x + EPS)).detach())
-
-            if Dx >= 2:
-                Cr = _pearson_corr(Xr_all);  Cs = _pearson_corr(Xs_all)
-                pe_abs, pe_rel = _fro_rel(Cr, Cs)
-                Crs = _spearman_corr(Xr_all); Css = _spearman_corr(Xs_all)
-                sp_abs, sp_rel = _fro_rel(Crs, Css)
-                x_acc["pearson_fro"]     += float(pe_abs.detach())
-                x_acc["pearson_fro_rel"] += float(pe_rel.detach())
-                x_acc["spearman_fro"]    += float(sp_abs.detach())
-                x_acc["spearman_fro_rel"]+= float(sp_rel.detach())
-                x_acc["_corr_count"]     += 1  # mark that we accumulated corr
-
-            # ===================== y-only =====================
-            ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
-                Yr_all, Ys_all,
-                grid_points=ks_grid_y, tau=ks_tau_y, norm=w1_norm_y,
-                denom_override=denom_y_global
-            )
-            mmd2_rvs_y, sigma_y = _mmd_rbf_biased(Yr_all, Ys_all)
-            mmd2_rvr_med_y = _mmd_rvr_median(Yr_all, sigma_y, rvr_boots)
-            y_acc["ks_mean"]      += float(ks_mean.detach())
-            y_acc["ks_median"]    += float(ks_med.detach())
-            y_acc["w1_mean"]      += float(w1_mean.detach())
-            y_acc["w1_median"]    += float(w1_med.detach())
-            y_acc["mmd2_rvs"]     += float(mmd2_rvs_y.detach())
-            y_acc["mmd2_rvr_med"] += float(mmd2_rvr_med_y)
-            y_acc["mmd2_ratio"]   += float((mmd2_rvs_y / (mmd2_rvr_med_y + EPS)).detach())
-
-            if Dy >= 2:
-                Cr = _pearson_corr(Yr_all);  Cs = _pearson_corr(Ys_all)
-                pe_abs, pe_rel = _fro_rel(Cr, Cs)
-                Crs = _spearman_corr(Yr_all); Css = _spearman_corr(Ys_all)
-                sp_abs, sp_rel = _fro_rel(Crs, Css)
-                y_acc["pearson_fro"]     += float(pe_abs.detach())
-                y_acc["pearson_fro_rel"] += float(pe_rel.detach())
-                y_acc["spearman_fro"]    += float(sp_abs.detach())
-                y_acc["spearman_fro_rel"]+= float(sp_rel.detach())
-                y_acc["_corr_count"]     += 1
-
-            # === overall (concat) — existing KS/W1 & MMD keep as-is ===
-
-            # NEW XY correlation (on the X↔y block):
-            pe_abs_xy, pe_rel_xy = _pearson_xyblock_fro_gap(
-                model, Xr_all, Yr_all, Xs_all, Ys_all, relative=True
-            )
-            sp_abs_xy, sp_rel_xy = _softspearman_xyblock_fro_gap(
-                model, Xr_all, Yr_all, Xs_all, Ys_all, tau=float(loss_like_kwargs.get("corr_xy_tau", 0.05)),
-                relative=True
-            )
-            overall_acc["xy_pearson_fro"] += float(pe_abs_xy.detach())
-            overall_acc["xy_pearson_fro_rel"] += float(pe_rel_xy.detach())
-            overall_acc["xy_spearman_fro"] += float(sp_abs_xy.detach())
-            overall_acc["xy_spearman_fro_rel"] += float(sp_rel_xy.detach())
-            overall_acc["_xycorr_count"] += 1
-
-            # ===================== per-class =====================
-            for cls in counts.keys():
-                xr_c = real_x_by_cls[cls];  yr_c = real_y_by_cls[cls]
-                xs_c = synth_x_by_cls[cls]; ys_c = synth_y_by_cls[cls]
-
-                # overall (concat X|y)
-                rc_all = torch.cat([xr_c, yr_c], dim=1)
-                sc_all = torch.cat([xs_c, ys_c], dim=1)
-                ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
-                    rc_all, sc_all,
-                    grid_points=ks_grid_all, tau=ks_tau_all, norm=w1_norm_all,
-                    denom_override=denom_all_global
-                )
-                mmd2_rvs, sigma = _mmd_rbf_biased(rc_all, sc_all)
-                mmd2_rvr_med = _mmd_rvr_median(rc_all, sigma, rvr_boots)
-
-                pc_over = per_class_acc[cls]["overall"]
-                pc_over["ks_mean"]      += float(ks_mean.detach())
-                pc_over["ks_median"]    += float(ks_med.detach())
-                pc_over["w1_mean"]      += float(w1_mean.detach())
-                pc_over["w1_median"]    += float(w1_med.detach())
-                pc_over["mmd2_rvs"]     += float(mmd2_rvs.detach())
-                pc_over["mmd2_rvr_med"] += float(mmd2_rvr_med)
-                pc_over["mmd2_ratio"]   += float((mmd2_rvs / (mmd2_rvr_med + EPS)).detach())
-
-                # X-only
-                ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
-                    xr_c, xs_c,
-                    grid_points=ks_grid_x, tau=ks_tau_x, norm=w1_norm_x,
-                    denom_override=denom_x_global
-                )
-                mmd2_rvs_x, sigma_x = _mmd_rbf_biased(xr_c, xs_c)
-                mmd2_rvr_med_x = _mmd_rvr_median(xr_c, sigma_x, rvr_boots)
-
-                pc_x = per_class_acc[cls]["x"]
-                pc_x["ks_mean"]      += float(ks_mean.detach())
-                pc_x["ks_median"]    += float(ks_med.detach())
-                pc_x["w1_mean"]      += float(w1_mean.detach())
-                pc_x["w1_median"]    += float(w1_med.detach())
-                pc_x["mmd2_rvs"]     += float(mmd2_rvs_x.detach())
-                pc_x["mmd2_rvr_med"] += float(mmd2_rvr_med_x)
-                pc_x["mmd2_ratio"]   += float((mmd2_rvs_x / (mmd2_rvr_med_x + EPS)).detach())
-
-                if xr_c.shape[1] >= 2:
-                    Cr = _pearson_corr(xr_c);  Cs = _pearson_corr(xs_c)
-                    pe_abs, pe_rel = _fro_rel(Cr, Cs)
-                    Crs = _spearman_corr(xr_c); Css = _spearman_corr(xs_c)
-                    sp_abs, sp_rel = _fro_rel(Crs, Css)
-                    pc_x["pearson_fro"]      += float(pe_abs.detach())
-                    pc_x["pearson_fro_rel"]  += float(pe_rel.detach())
-                    pc_x["spearman_fro"]     += float(sp_abs.detach())
-                    pc_x["spearman_fro_rel"] += float(sp_rel.detach())
-                    pc_x["_corr_count"]      += 1
-
-                # y-only
-                ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
-                    yr_c, ys_c,
-                    grid_points=ks_grid_y, tau=ks_tau_y, norm=w1_norm_y,
-                    denom_override=denom_y_global
-                )
-                mmd2_rvs_y, sigma_y = _mmd_rbf_biased(yr_c, ys_c)
-                mmd2_rvr_med_y = _mmd_rvr_median(yr_c, sigma_y, rvr_boots)
-
-                pc_y = per_class_acc[cls]["y"]
-                pc_y["ks_mean"]      += float(ks_mean.detach())
-                pc_y["ks_median"]    += float(ks_med.detach())
-                pc_y["w1_mean"]      += float(w1_mean.detach())
-                pc_y["w1_median"]    += float(w1_med.detach())
-                pc_y["mmd2_rvs"]     += float(mmd2_rvs_y.detach())
-                pc_y["mmd2_rvr_med"] += float(mmd2_rvr_med_y)
-                pc_y["mmd2_ratio"]   += float((mmd2_rvs_y / (mmd2_rvr_med_y + EPS)).detach())
-
-                if yr_c.shape[1] >= 2:
-                    Cr = _pearson_corr(yr_c);  Cs = _pearson_corr(ys_c)
-                    pe_abs, pe_rel = _fro_rel(Cr, Cs)
-                    Crs = _spearman_corr(yr_c); Css = _spearman_corr(ys_c)
-                    sp_abs, sp_rel = _fro_rel(Crs, Css)
-                    pc_y["pearson_fro"]      += float(pe_abs.detach())
-                    pc_y["pearson_fro_rel"]  += float(pe_rel.detach())
-                    pc_y["spearman_fro"]     += float(sp_abs.detach())
-                    pc_y["spearman_fro_rel"] += float(sp_rel.detach())
-                    pc_y["_corr_count"]      += 1
-
-                # per-class overall XY block correlation
-                pe_abs_xy, pe_rel_xy = _pearson_xyblock_fro_gap(
-                    model, xr_c, yr_c, xs_c, ys_c, relative=True
-                )
-                sp_abs_xy, sp_rel_xy = _softspearman_xyblock_fro_gap(
-                    model, xr_c, yr_c, xs_c, ys_c, tau=float(loss_like_kwargs.get("corr_xy_tau", 0.05)), relative=True
-                )
-                pc_over["xy_pearson_fro"] += float(pe_abs_xy.detach())
-                pc_over["xy_pearson_fro_rel"] += float(pe_rel_xy.detach())
-                pc_over["xy_spearman_fro"] += float(sp_abs_xy.detach())
-                pc_over["xy_spearman_fro_rel"] += float(sp_rel_xy.detach())
-                pc_over["_xycorr_count"] += 1
-
-        # ---- finalize averages over replicates ----
-        def _finalize_suite(acc: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
-            out = {
-                "ks_mean": acc["ks_mean"] / boots,
-                "ks_median": acc["ks_median"] / boots,
-                "w1_mean": acc["w1_mean"] / boots,
-                "w1_median": acc["w1_median"] / boots,
-                "pearson_fro": None, "pearson_fro_rel": None,
-                "spearman_fro": None, "spearman_fro_rel": None,
-                # NEW: XY block corr (only for “overall”, so may stay None elsewhere)
-                "xy_pearson_fro": None, "xy_pearson_fro_rel": None,
-                "xy_spearman_fro": None, "xy_spearman_fro_rel": None,
-                "mmd2_rvs": acc["mmd2_rvs"] / boots,
-                "mmd2_rvr_med": acc["mmd2_rvr_med"] / boots,
-                "mmd2_ratio": acc["mmd2_ratio"] / boots,
-            }
-            if "_corr_count" in acc and acc["_corr_count"] > 0:
-                k = float(acc["_corr_count"])
-                out["pearson_fro"] = acc["pearson_fro"] / k
-                out["pearson_fro_rel"] = acc["pearson_fro_rel"] / k
-                out["spearman_fro"] = acc["spearman_fro"] / k
-                out["spearman_fro_rel"] = acc["spearman_fro_rel"] / k
-            if "_xycorr_count" in acc and acc["_xycorr_count"] > 0:
-                kxy = float(acc["_xycorr_count"])
-                out["xy_pearson_fro"] = acc["xy_pearson_fro"] / kxy
-                out["xy_pearson_fro_rel"] = acc["xy_pearson_fro_rel"] / kxy
-                out["xy_spearman_fro"] = acc["xy_spearman_fro"] / kxy
-                out["xy_spearman_fro_rel"] = acc["xy_spearman_fro_rel"] / kxy
-            return {kk: (None if vv is None else float(vv)) for kk, vv in out.items()}
-
-        realism = {
-            "overall": _finalize_suite(overall_acc),
-            "x": _finalize_suite(x_acc),
-            "y": _finalize_suite(y_acc),
-            "per_class": {},
-        }
-        for cls, suites in per_class_acc.items():
-            realism["per_class"][int(cls)] = {
-                "overall": _finalize_suite(suites["overall"]),
-                "x": _finalize_suite(suites["x"]),
-                "y": _finalize_suite(suites["y"]),
-            }
-        return realism
+    return _canonical_compute_realism_metrics_for_set(
+        model,
+        x_ref,
+        y_ref,
+        c_ref,
+        loss_like_kwargs=loss_like_kwargs,
+        device=device,
+        seed=seed,
+    )
 
 def compute_realism_metrics_for_set_with_temperature(
     model,
@@ -1197,7 +773,7 @@ def compute_realism_metrics_for_set_with_temperature(
                     r2 = real_mat.index_select(0, idx2)
                     m2, _ = _mmd_rbf_biased(r1, r2, sigma=sigma)
                     vals.append(float(m2.detach()))
-                return float(torch.tensor(vals, device=device).median().detach())
+                return float(real_mat.new_tensor(vals).median().detach())
 
             # ===================== overall =====================
             ks_mean, ks_med, w1_mean, w1_med = _ks_w1_matrix(
@@ -1796,6 +1372,9 @@ def train_flowgen_model(
         cXy_val: pd.DataFrame,
         condition_col: str,
         cXy_test: pd.DataFrame | None = None,
+        r_train: pd.DataFrame | None = None,
+        r_val: pd.DataFrame | None = None,
+        allow_test_holdout: bool = False,
         seed: int | None = None,
         config_filename: str = "flowgen.yaml",
         base_name: str = "flow_gen_v1",
@@ -1805,6 +1384,12 @@ def train_flowgen_model(
         pretrained_model: torch.nn.Module | None = None,
         pretrained_path: str | Path | None = None,
         skip_phase1: bool = False,
+        evaluation_context: Optional[dict] = None,
+        monitoring_policy: str = OFFICIAL_VAL_POLICY,
+        output_namespace: str | None = None,
+        output_subdir: str | None = None,
+        fixed_run_id: str | None = None,
+        log_in_run_dir: bool = False,
 ):
     """
     Train a conditional normalizing flow on concatenated [X, y] given class labels using FlowGen.
@@ -1815,10 +1400,31 @@ def train_flowgen_model(
     # -------------------- Setup & config --------------------
     seed = _maybe_set_seed(seed)
 
-    config    = load_yaml_config(config_filename)
+    cfg_path = Path(config_filename)
+    if not cfg_path.parent or cfg_path.parent == Path("."):
+        cfg_path = ROOT_PATH / "config" / cfg_path
+    if not cfg_path.suffix:
+        cfg_path = cfg_path.with_suffix(".yaml")
+
+    config    = load_yaml_config(cfg_path)
     model_cfg = config["model"]
     train_cfg = config["training"]
     interp_cfg = config.get("interpretability", {})
+    monitoring_policy = normalize_monitoring_policy(monitoring_policy)
+    ensure_holdout_policy(monitoring_policy, allow_test_holdout=allow_test_holdout)
+    eval_ctx, monitoring_info = with_monitoring_context(evaluation_context, monitoring_policy)
+    monitoring_artifact = monitoring_info if monitoring_policy == TRAIN_ONLY_POLICY else None
+    output_namespace = experimental_output_namespace(output_namespace, monitoring_policy)
+    monitor_label = "Train-monitor" if monitoring_policy == TRAIN_ONLY_POLICY else "Val"
+    improvement_label = "Monitor Improvement" if monitoring_policy == TRAIN_ONLY_POLICY else "Validation Improvement"
+    best_loss_label = "Best monitor loss" if monitoring_policy == TRAIN_ONLY_POLICY else "Best validation loss"
+    baseline_label = "monitor" if monitoring_policy == TRAIN_ONLY_POLICY else "validation"
+    loss_tag = "monitorloss" if monitoring_policy == TRAIN_ONLY_POLICY else "valloss"
+    if monitoring_policy == TRAIN_ONLY_POLICY:
+        cXy_val = cXy_train.copy()
+        r_val = None
+    if not allow_test_holdout:
+        cXy_test = None
 
     # Accept str or torch.device; prefer MPS → CUDA → CPU with fallback
     if isinstance(device, torch.device):
@@ -1830,8 +1436,17 @@ def train_flowgen_model(
 
     # -------------------- Logging dirs --------------------
     versioned_dir, versioned_name, log_file_path, snapshots_dir = setup_training_logs_and_dirs(
-        base_name, config_filename, config, verbose, train_cfg.get("save_states", False),
-        train_cfg.get("log_training", True), subdir="flowgen",
+        base_name,
+        str(cfg_path),
+        config,
+        verbose,
+        train_cfg.get("save_states", False),
+        train_cfg.get("log_training", True),
+        subdir="flowgen",
+        namespace=output_namespace,
+        relative_subdir=output_subdir,
+        fixed_run_id=fixed_run_id,
+        log_in_run_dir=log_in_run_dir,
     )
 
     flowpre_log(f"Using device: {device}", log_training=train_cfg.get("log_training", True),
@@ -1951,6 +1566,13 @@ def train_flowgen_model(
                 filename_or_path=log_file_path, verbose=verbose)
     flowpre_log(f"🎲 Using seed: {seed}", log_training=log_training,
                 filename_or_path=log_file_path, verbose=verbose)
+    flowpre_log(
+        f"Monitoring policy: {monitoring_policy} | {monitoring_info['monitor_result_key']} role: "
+        f"{monitoring_info['monitor_role']}",
+        log_training=log_training,
+        filename_or_path=log_file_path,
+        verbose=verbose,
+    )
 
     # Base distribution sanity check: dim = X + Y
     base = StandardNormal([x_train.shape[1] + y_train.shape[1]])
@@ -1964,6 +1586,7 @@ def train_flowgen_model(
     state_loss_epoch_ft = None
     finetune_total_epochs = 0
     ft_rebase_epoch = None
+    loss_kwargs_ft = None
 
     # Track the first time we complete the realism ramp (phase ≈ 1) in Phase-1
     p1_ramp_rebased = False
@@ -1973,7 +1596,7 @@ def train_flowgen_model(
     if skip_phase1:
         flowpre_log("⏭️ Skipping Phase-1 (will only finetune).",
                     filename_or_path=log_file_path, verbose=verbose)
-        best_model_state = deepcopy(model.state_dict())
+        best_model_state = _state_dict_to_cpu(model.state_dict())
         state_loss_epoch = None
         # mark as if Phase-1 concluded so finetune can run
         did_early_stop = True
@@ -2031,7 +1654,7 @@ def train_flowgen_model(
 
             flowpre_log(
                 f"📉 Epoch {epoch + 1}/{total_epochs} — "
-                f"Train Loss: {avg_train_loss:.4f} | Val Loss: {float(val_loss):.4f}",
+                f"Train Loss: {avg_train_loss:.4f} | {monitor_label} Loss: {float(val_loss):.4f}",
                 filename_or_path=log_file_path, verbose=verbose
             )
             flowpre_log(
@@ -2040,7 +1663,7 @@ def train_flowgen_model(
                 filename_or_path=log_file_path, verbose=verbose
             )
             flowpre_log(
-                f"🔍 Val   RRMSE — X: mean={float(vrmx):.4f}, std={float(vrxs):.4f} | "
+                f"🔍 {monitor_label} RRMSE — X: mean={float(vrmx):.4f}, std={float(vrxs):.4f} | "
                 f"Y: mean={float(vrmy):.4f}, std={float(vrystd):.4f}",
                 filename_or_path=log_file_path, verbose=verbose
             )
@@ -2077,30 +1700,30 @@ def train_flowgen_model(
                 # Rebase baseline to *current* validation loss and snapshot the state
                 best_val_loss = float(val_loss)
                 state_loss_epoch = epoch + 1
-                best_model_state = deepcopy(model.state_dict())
+                best_model_state = _state_dict_to_cpu(model.state_dict())
 
                 flowpre_log(
-                    "🔁 Rebased validation baseline at realism ramp completion (Phase-1); skipping scheduler this epoch.",
+                    f"🔁 Rebased {baseline_label} baseline at realism ramp completion (Phase-1); skipping scheduler this epoch.",
                     filename_or_path=log_file_path, verbose=verbose)
 
                 # Skip improvement/LR/early-stop logic for this epoch
                 continue
 
             improvement = (best_val_loss - float(val_loss)) / (abs(best_val_loss) + 1e-8) if best_val_loss < float("inf") else float("inf")
-            flowpre_log(f"📈 Validation Improvement: {improvement:.4f}",
+            flowpre_log(f"📈 {improvement_label}: {improvement:.4f}",
                         filename_or_path=log_file_path, verbose=verbose)
 
             if float(val_loss) < best_val_loss:
                 best_val_loss    = float(val_loss)
                 state_loss_epoch = epoch + 1
-                best_model_state = deepcopy(model.state_dict())
+                best_model_state = _state_dict_to_cpu(model.state_dict())
 
                 if improvement >= min_improvement:
                     epochs_no_improve = 0
                     lr_decay_wait     = 0
 
                     if train_cfg.get("save_states", False):
-                        snapshot_path = snapshots_dir / f"{versioned_name}_epoch{epoch + 1}_valloss{float(val_loss):.4f}.pt"
+                        snapshot_path = snapshots_dir / f"{versioned_name}_epoch{epoch + 1}_{loss_tag}{float(val_loss):.4f}.pt"
                         torch.save(best_model_state, snapshot_path)
                         flowpre_log(f"💾 Saved snapshot: {snapshot_path.name}",
                                     filename_or_path=log_file_path, verbose=verbose)
@@ -2151,13 +1774,17 @@ def train_flowgen_model(
         phase1_total_epochs = (epoch + 1)
         phase1_best_epoch = state_loss_epoch
 
-        flowpre_log(f"✅ Best validation loss: {best_val_loss:.4f} (epoch {state_loss_epoch})",
+        flowpre_log(f"✅ {best_loss_label}: {best_val_loss:.4f} (epoch {state_loss_epoch})",
                     filename_or_path=log_file_path, verbose=verbose)
     else:
         phase1_total_epochs = 0
         phase1_best_epoch = None
 
-    phase1_best_state = deepcopy(best_model_state) if best_model_state is not None else deepcopy(model.state_dict())
+    phase1_best_state = (
+        _state_dict_to_cpu(best_model_state)
+        if best_model_state is not None
+        else _state_dict_to_cpu(model.state_dict())
+    )
 
     # -------------------- Phase 2: realism finetuning (optional) --------------------
     finetune_enabled = _any_realism_enabled_from_cfg(train_cfg)
@@ -2257,7 +1884,7 @@ def train_flowgen_model(
 
             flowpre_log(
                 f"📉 [FT] Epoch {ft_epoch + 1}/{total_epochs_finetune} — "
-                f"Train Loss: {avg_train_loss:.4f} | Val Loss: {float(val_loss):.4f}",
+                f"Train Loss: {avg_train_loss:.4f} | {monitor_label} Loss: {float(val_loss):.4f}",
                 filename_or_path=log_file_path, verbose=verbose
             )
             flowpre_log(
@@ -2266,7 +1893,7 @@ def train_flowgen_model(
                 filename_or_path=log_file_path, verbose=verbose
             )
             flowpre_log(
-                f"🔍 [FT] Val   RRMSE — X: mean={float(vrmx):.4f}, std={float(vrxs):.4f} | "
+                f"🔍 [FT] {monitor_label} RRMSE — X: mean={float(vrmx):.4f}, std={float(vrxs):.4f} | "
                 f"Y: mean={float(vrmy):.4f}, std={float(vrystd):.4f}",
                 filename_or_path=log_file_path, verbose=verbose
             )
@@ -2305,29 +1932,29 @@ def train_flowgen_model(
                 # Rebase to current loss and snapshot; then skip this epoch's scheduler logic
                 best_val_loss = float(val_loss)
                 state_loss_epoch_ft = ft_epoch + 1
-                best_model_state = deepcopy(model.state_dict())
+                best_model_state = _state_dict_to_cpu(model.state_dict())
 
                 flowpre_log(
-                    "🔁 [FT] Rebased validation baseline at realism ramp completion; skipping scheduler this epoch.",
+                    f"🔁 [FT] Rebased {baseline_label} baseline at realism ramp completion; skipping scheduler this epoch.",
                     filename_or_path=log_file_path, verbose=verbose)
                 continue
 
             improvement = (best_val_loss - float(val_loss)) / (abs(best_val_loss) + 1e-8) if best_val_loss < float(
                 "inf") else float("inf")
-            flowpre_log(f"📈 [FT] Validation Improvement: {improvement:.4f}",
+            flowpre_log(f"📈 [FT] {improvement_label}: {improvement:.4f}",
                         filename_or_path=log_file_path, verbose=verbose)
 
             if float(val_loss) < best_val_loss:
                 best_val_loss = float(val_loss)
                 state_loss_epoch_ft = ft_epoch + 1
-                best_model_state = deepcopy(model.state_dict())
+                best_model_state = _state_dict_to_cpu(model.state_dict())
 
                 if improvement >= min_improvement:
                     epochs_no_improve = 0
                     lr_decay_wait = 0
 
                     if train_cfg.get("save_states", False):
-                        snapshot_path = snapshots_dir / f"{versioned_name}_FT_epoch{ft_epoch + 1}_valloss{float(val_loss):.4f}.pt"
+                        snapshot_path = snapshots_dir / f"{versioned_name}_FT_epoch{ft_epoch + 1}_{loss_tag}{float(val_loss):.4f}.pt"
                         torch.save(best_model_state, snapshot_path)
                         flowpre_log(f"💾 Saved [FT] snapshot: {snapshot_path.name}",
                                     filename_or_path=log_file_path, verbose=verbose)
@@ -2375,7 +2002,7 @@ def train_flowgen_model(
                     break
 
         finetune_total_epochs = (ft_epoch + 1)
-        flowpre_log(f"✅ [FT] Best validation loss: {best_val_loss:.4f} (epoch {state_loss_epoch_ft})",
+        flowpre_log(f"✅ [FT] {best_loss_label}: {best_val_loss:.4f} (epoch {state_loss_epoch_ft})",
                     filename_or_path=log_file_path, verbose=verbose)
 
         if best_model_state is not None:
@@ -2387,66 +2014,114 @@ def train_flowgen_model(
     # Final snapshot (optional)
     if train_cfg.get("save_states", False):
         best_epoch_tag = state_loss_epoch_ft if state_loss_epoch_ft is not None else state_loss_epoch
-        final_path = snapshots_dir / f"{versioned_name}_best_epoch{best_epoch_tag}_valloss{best_val_loss:.4f}.pt"
+        final_path = snapshots_dir / f"{versioned_name}_best_epoch{best_epoch_tag}_{loss_tag}{best_val_loss:.4f}.pt"
         torch.save(best_model_state, final_path)
 
-    # Final reconstruction metrics on both train and val sets (FlowGen, using forward_xy/inverse_xy)
-    model.eval()
-    with torch.no_grad():
-        # --- Train ---
-        z_train, _ = model.forward_xy(x_train, y_train, c_train)
-        (x_recon_train, y_recon_train), _ = model.inverse_xy(z_train, c_train)
+    flowpre_log("🧱 Postprocess start: split_metrics_train", filename_or_path=log_file_path, verbose=verbose)
+    split_metrics_train = compute_flowgen_split_metrics(
+        model=model,
+        x=x_train,
+        y=y_train,
+        c=c_train,
+        loss_kwargs=loss_kwargs,
+        include_realism=True,
+        device=device,
+        seed=seed,
+    )
+    flowpre_log("✅ Postprocess end: split_metrics_train", filename_or_path=log_file_path, verbose=verbose)
+    flowpre_log("🧱 Postprocess start: split_metrics_val", filename_or_path=log_file_path, verbose=verbose)
+    split_metrics_val = compute_flowgen_split_metrics(
+        model=model,
+        x=x_val,
+        y=y_val,
+        c=c_val,
+        loss_kwargs=loss_kwargs,
+        include_realism=True,
+        device=device,
+        seed=seed,
+    )
+    flowpre_log("✅ Postprocess end: split_metrics_val", filename_or_path=log_file_path, verbose=verbose)
+    split_metrics_test = None
+    if allow_test_holdout and (x_test is not None and y_test is not None and c_test is not None):
+        flowpre_log("🧱 Postprocess start: split_metrics_test", filename_or_path=log_file_path, verbose=verbose)
+        split_metrics_test = compute_flowgen_split_metrics(
+            model=model,
+            x=x_test,
+            y=y_test,
+            c=c_test,
+            loss_kwargs=loss_kwargs,
+            include_realism=True,
+            device=device,
+            seed=seed,
+        )
+        flowpre_log("✅ Postprocess end: split_metrics_test", filename_or_path=log_file_path, verbose=verbose)
 
-        rrmse_x_train = (
-                torch.sqrt(torch.mean((x_recon_train - x_train) ** 2)) /
-                (torch.sqrt(torch.mean(x_train ** 2)) + 1e-12)
-        ).item()
-        rrmse_y_train = (
-                torch.sqrt(torch.mean((y_recon_train - y_train) ** 2)) /
-                (torch.sqrt(torch.mean(y_train ** 2)) + 1e-12)
-        ).item()
-
-        ss_res_x_train = torch.sum((x_train - x_recon_train) ** 2)
-        ss_tot_x_train = torch.sum((x_train - x_train.mean(dim=0)) ** 2)
-        r2_x_train = (1 - ss_res_x_train / (ss_tot_x_train + 1e-12)).item()
-
-        ss_res_y_train = torch.sum((y_train - y_recon_train) ** 2)
-        ss_tot_y_train = torch.sum((y_train - y_train.mean(dim=0)) ** 2)
-        r2_y_train = (1 - ss_res_y_train / (ss_tot_y_train + 1e-12)).item()
-
-        # --- Val ---
-        z_val, _ = model.forward_xy(x_val, y_val, c_val)
-        (x_recon_val, y_recon_val), _ = model.inverse_xy(z_val, c_val)
-
-        rrmse_x_val = (
-                torch.sqrt(torch.mean((x_recon_val - x_val) ** 2)) /
-                (torch.sqrt(torch.mean(x_val ** 2)) + 1e-12)
-        ).item()
-        rrmse_y_val = (
-                torch.sqrt(torch.mean((y_recon_val - y_val) ** 2)) /
-                (torch.sqrt(torch.mean(y_val ** 2)) + 1e-12)
-        ).item()
-
-        ss_res_x_val = torch.sum((x_val - x_recon_val) ** 2)
-        ss_tot_x_val = torch.sum((x_val - x_val.mean(dim=0)) ** 2)
-        r2_x_val = (1 - ss_res_x_val / (ss_tot_x_val + 1e-12)).item()
-
-        ss_res_y_val = torch.sum((y_val - y_recon_val) ** 2)
-        ss_tot_y_val = torch.sum((y_val - y_val.mean(dim=0)) ** 2)
-        r2_y_val = (1 - ss_res_y_val / (ss_tot_y_val + 1e-12)).item()
+    temporal_realism_block = None
+    temporal_realism_artifacts = None
+    temporal_cfg = resolve_temporal_realism_config(train_cfg=train_cfg, loss_like_kwargs=loss_kwargs)
+    if monitoring_policy == TRAIN_ONLY_POLICY and temporal_cfg.get("enabled", False):
+        temporal_cfg = {**temporal_cfg, "enabled": False}
+        flowpre_log(
+            "Temporal realism disabled: train-only monitoring does not provide a temporal validation holdout.",
+            filename_or_path=log_file_path,
+            verbose=verbose,
+        )
+    if train_cfg.get("save_results", False) and temporal_cfg.get("enabled", False):
+        if r_val is None:
+            flowpre_log(
+                "⚠️ Temporal realism skipped because r_val was not provided to the closeout phase.",
+                filename_or_path=log_file_path,
+                verbose=verbose,
+            )
+        else:
+            flowpre_log("🧱 Postprocess start: temporal_realism", filename_or_path=log_file_path, verbose=verbose)
+            try:
+                temporal_payload = build_temporal_realism_block(
+                    model=model,
+                    x_train=x_train,
+                    y_train=y_train,
+                    c_train=c_train,
+                    x_val=x_val,
+                    y_val=y_val,
+                    c_val=c_val,
+                    cxy_val=cXy_val,
+                    r_val=r_val,
+                    loss_like_kwargs=loss_kwargs,
+                    temporal_cfg=temporal_cfg,
+                    device=device,
+                    seed=seed,
+                    run_id=versioned_name,
+                    split_id=str(eval_ctx.get("split_id", "init_temporal_processed_v1")),
+                    condition_col=condition_col,
+                )
+                if temporal_cfg.get("write_sidecars", True):
+                    temporal_realism_artifacts = write_temporal_realism_sidecars(
+                        out_dir=versioned_dir,
+                        payload=temporal_payload,
+                    )
+                temporal_realism_block = dict(temporal_payload["block"])
+                temporal_realism_block["artifacts"] = dict(temporal_realism_artifacts or {})
+                flowpre_log("✅ Postprocess end: temporal_realism", filename_or_path=log_file_path, verbose=verbose)
+            except Exception as exc:
+                flowpre_log(
+                    f"⚠️ Temporal realism skipped after an additive-phase failure: {exc}",
+                    filename_or_path=log_file_path,
+                    verbose=verbose,
+                )
 
     flowpre_log(
-        f"📈 Train RRMSE — X: {rrmse_x_train:.4f}, Y: {rrmse_y_train:.4f} | "
-        f"R² — X: {r2_x_train:.4f}, Y: {r2_y_train:.4f}",
+        f"📈 Train RRMSE — X: {split_metrics_train['rrmse_x_recon']:.4f}, Y: {split_metrics_train['rrmse_y_recon']:.4f} | "
+        f"R² — X: {split_metrics_train['r2_x_recon']:.4f}, Y: {split_metrics_train['r2_y_recon']:.4f}",
         filename_or_path=log_file_path, verbose=verbose
     )
     flowpre_log(
-        f"📈 Val   RRMSE — X: {rrmse_x_val:.4f}, Y: {rrmse_y_val:.4f} | "
-        f"R² — X: {r2_x_val:.4f}, Y: {r2_y_val:.4f}",
+        f"📈 {monitor_label} RRMSE — X: {split_metrics_val['rrmse_x_recon']:.4f}, Y: {split_metrics_val['rrmse_y_recon']:.4f} | "
+        f"R² — X: {split_metrics_val['r2_x_recon']:.4f}, Y: {split_metrics_val['r2_y_recon']:.4f}",
         filename_or_path=log_file_path, verbose=verbose
     )
 
     # ---- Latent influence over X and y (FlowGen-specific helper)
+    flowpre_log("🧱 Postprocess start: influence", filename_or_path=log_file_path, verbose=verbose)
     influence_dict = compute_latent_feature_influence_flowgen(
         model,
         x_train, y_train, c_train,
@@ -2456,96 +2131,20 @@ def train_flowgen_model(
         sweep_range=tuple(interp_cfg.get("sweep_range", [-model_cfg.get("tail_bound", 3.0),
                                                          model_cfg.get("tail_bound", 3.0)])),
     )
+    flowpre_log("✅ Postprocess end: influence", filename_or_path=log_file_path, verbose=verbose)
 
-    # --- Per-class isotropy RRMSE from the loss (using full Train/Val/Test tensors) ---
-    train_iso_per_class = _iso_rrmse_per_class_from_loss(model, x_train, y_train, c_train, loss_kwargs)
-    val_iso_per_class = _iso_rrmse_per_class_from_loss(model, x_val, y_val, c_val, loss_kwargs)
-    test_iso_per_class = (
-        _iso_rrmse_per_class_from_loss(model, x_test, y_test, c_test, loss_kwargs)
-        if (x_test is not None and y_test is not None and c_test is not None) else {}
-    )
-
-    # --- Whole-set isotropy diagnostics (moments, Mahalanobis, eigvals) on z ---
-    train_iso_whole = _latent_isotropy_stats(model, x_train, y_train, c_train)
-    val_iso_whole = _latent_isotropy_stats(model, x_val, y_val, c_val)
-    test_iso_whole = (
-        _latent_isotropy_stats(model, x_test, y_test, c_test)
-        if (x_test is not None and y_test is not None and c_test is not None) else {}
-    )
-
-    # --- Per-class extended isotropy diagnostics ---
-    train_iso_per_class_ext = _latent_isotropy_stats_per_class(model, x_train, y_train, c_train)
-    val_iso_per_class_ext = _latent_isotropy_stats_per_class(model, x_val, y_val, c_val)
-    test_iso_per_class_ext = (
-        _latent_isotropy_stats_per_class(model, x_test, y_test, c_test)
-        if (x_test is not None and y_test is not None and c_test is not None) else {}
-    )
-
-    # Optional compact log (print dicts directly)
-    flowpre_log(f"📊 Per-class isotropy (Train): {train_iso_per_class}",
+    flowpre_log(f"📊 Per-class isotropy (Train): {_format_iso_dict(split_metrics_train['per_class_iso_rrmse'])}",
                 filename_or_path=log_file_path, verbose=verbose)
-    flowpre_log(f"📊 Per-class isotropy (Val):   {val_iso_per_class}",
+    flowpre_log(f"📊 Per-class isotropy ({monitor_label}):   {_format_iso_dict(split_metrics_val['per_class_iso_rrmse'])}",
                 filename_or_path=log_file_path, verbose=verbose)
 
-    # --- Overall isotropy from the loss (mean→0, std→1) — X and Y reported separately ---
-    (train_rrmse_x_mean_whole, train_rrmse_x_std_whole,
-     train_rrmse_y_mean_whole, train_rrmse_y_std_whole) = (None, None, None, None)
-    (val_rrmse_x_mean_whole, val_rrmse_x_std_whole,
-     val_rrmse_y_mean_whole, val_rrmse_y_std_whole) = (None, None, None, None)
-    (test_rrmse_x_mean_whole, test_rrmse_x_std_whole,
-     test_rrmse_y_mean_whole, test_rrmse_y_std_whole) = (None, None, None, None)
-
-    model.eval()
-    loss_kwargs_forced = {**loss_kwargs, "enforce_realism": True}
-    with torch.no_grad():
-        # TRAIN
-        _, _, trmx, trxs, trmy, trys = flowgen_loss(
-            model, x_train, y_train, c_train,
-            epoch=0, batch_index=0, **(loss_kwargs_forced or {})
-        )
-        # VAL
-        _, _, vrmx, vrxs, vrmy, vrys = flowgen_loss(
-            model, x_val, y_val, c_val,
-            epoch=0, batch_index=0, **(loss_kwargs_forced or {})
-        )
-        # TEST (optional)
-        if (x_test is not None) and (y_test is not None) and (c_test is not None):
-            _, _, termx, terxs, termy, terys = flowgen_loss(
-                model, x_test, y_test, c_test,
-                epoch=0, batch_index=0, **(loss_kwargs_forced or {})
-            )
-            test_rrmse_x_mean_whole = float(termx);
-            test_rrmse_x_std_whole = float(terxs)
-            test_rrmse_y_mean_whole = float(termy);
-            test_rrmse_y_std_whole = float(terys)
-
-    train_rrmse_x_mean_whole = float(trmx);
-    train_rrmse_x_std_whole = float(trxs)
-    train_rrmse_y_mean_whole = float(trmy);
-    train_rrmse_y_std_whole = float(trys)
-    val_rrmse_x_mean_whole = float(vrmx);
-    val_rrmse_x_std_whole = float(vrxs)
-    val_rrmse_y_mean_whole = float(vrmy);
-    val_rrmse_y_std_whole = float(vrys)
+    metrics_long_path = None
+    results_path = None
+    results = None
 
     # --- Save results with overall isotropy (X/Y separated) ---
     if train_cfg.get("save_results", False):
-        # End-of-training realism (computed regardless of training toggles)
-        realism_train = compute_realism_metrics_for_set(
-            model, x_train, y_train, c_train,
-            loss_like_kwargs=loss_kwargs, device=device, seed=seed
-        )
-        realism_val = compute_realism_metrics_for_set(
-            model, x_val, y_val, c_val,
-            loss_like_kwargs=loss_kwargs, device=device, seed=seed
-        )
-        realism_test = None
-        if (x_test is not None) and (y_test is not None) and (c_test is not None):
-            realism_test = compute_realism_metrics_for_set(
-                model, x_test, y_test, c_test,
-                loss_like_kwargs=loss_kwargs, device=device, seed=seed
-            )
-
+        flowpre_log("🧱 Postprocess start: save_results", filename_or_path=log_file_path, verbose=verbose)
         results = {
             "seed": seed,
             "phase1": {
@@ -2560,80 +2159,17 @@ def train_flowgen_model(
                 "total_epochs": finetune_total_epochs if state_loss_epoch_ft is not None else 0,
                 "ramp_rebase_epoch": ft_rebase_epoch,  # NEW
             },
-
-
-            "train": {
-                "rrmse_x_recon": round(rrmse_x_train, 6),
-                "rrmse_y_recon": round(rrmse_y_train, 6),
-                "r2_x_recon": round(r2_x_train, 6),
-                "r2_y_recon": round(r2_y_train, 6),
-
-                "loss_rrmse_x_mean_whole": round(train_rrmse_x_mean_whole, 6),
-                "loss_rrmse_x_std_whole": round(train_rrmse_x_std_whole, 6),
-                "loss_rrmse_y_mean_whole": round(train_rrmse_y_mean_whole, 6),
-                "loss_rrmse_y_std_whole": round(train_rrmse_y_std_whole, 6),
-
-                "per_class_iso_rrmse": train_iso_per_class,
-                "isotropy_stats": train_iso_whole,
-                "isotropy_stats_per_class": train_iso_per_class_ext,
-
-                "realism": realism_train,
-            },
-            "val": {
-                "rrmse_x_recon": round(rrmse_x_val, 6),
-                "rrmse_y_recon": round(rrmse_y_val, 6),
-                "r2_x_recon": round(r2_x_val, 6),
-                "r2_y_recon": round(r2_y_val, 6),
-
-                "loss_rrmse_x_mean_whole": round(val_rrmse_x_mean_whole, 6),
-                "loss_rrmse_x_std_whole": round(val_rrmse_x_std_whole, 6),
-                "loss_rrmse_y_mean_whole": round(val_rrmse_y_mean_whole, 6),
-                "loss_rrmse_y_std_whole": round(val_rrmse_y_std_whole, 6),
-
-                "per_class_iso_rrmse": val_iso_per_class,
-                "isotropy_stats": val_iso_whole,
-                "isotropy_stats_per_class": val_iso_per_class_ext,
-
-                "realism": realism_val,
-            }
+            "train": split_metrics_train,
+            "val": split_metrics_val,
         }
+        if monitoring_artifact is not None:
+            results["monitoring"] = monitoring_artifact
 
-        if (x_test is not None) and (y_test is not None) and (c_test is not None):
-            with torch.no_grad():
-                z_te, _ = model.forward_xy(x_test, y_test, c_test)
-                (x_recon_test, y_recon_test), _ = model.inverse_xy(z_te, c_test)
-                rrmse_x_test = (
-                        torch.sqrt(torch.mean((x_recon_test - x_test) ** 2)) /
-                        (torch.sqrt(torch.mean(x_test ** 2)) + 1e-12)
-                ).item()
-                rrmse_y_test = (
-                        torch.sqrt(torch.mean((y_recon_test - y_test) ** 2)) /
-                        (torch.sqrt(torch.mean(y_test ** 2)) + 1e-12)
-                ).item()
-                ss_res_x_test = torch.sum((x_test - x_recon_test) ** 2)
-                ss_tot_x_test = torch.sum((x_test - x_test.mean(dim=0)) ** 2)
-                r2_x_test = (1 - ss_res_x_test / (ss_tot_x_test + 1e-12)).item()
-                ss_res_y_test = torch.sum((y_test - y_recon_test) ** 2)
-                ss_tot_y_test = torch.sum((y_test - y_test.mean(dim=0)) ** 2)
-                r2_y_test = (1 - ss_res_y_test / (ss_tot_y_test + 1e-12)).item()
+        if temporal_realism_block is not None:
+            results["val"]["temporal_realism"] = temporal_realism_block
 
-            results["test"] = {
-                "rrmse_x_recon": round(rrmse_x_test, 6),
-                "rrmse_y_recon": round(rrmse_y_test, 6),
-                "r2_x_recon": round(r2_x_test, 6),
-                "r2_y_recon": round(r2_y_test, 6),
-
-                "loss_rrmse_x_mean_whole": round(test_rrmse_x_mean_whole,
-                                                 6) if test_rrmse_x_mean_whole is not None else None,
-                "loss_rrmse_x_std_whole": round(test_rrmse_x_std_whole,
-                                                6) if test_rrmse_x_std_whole is not None else None,
-                "loss_rrmse_y_mean_whole": round(test_rrmse_y_mean_whole,
-                                                 6) if test_rrmse_y_mean_whole is not None else None,
-                "loss_rrmse_y_std_whole": round(test_rrmse_y_std_whole,
-                                                6) if test_rrmse_y_std_whole is not None else None,
-
-                "realism": realism_test,
-            }
+        if split_metrics_test is not None:
+            results["test"] = split_metrics_test
 
         # === Add best-epoch total loss AND NLL loss (train & val) ===
         # Decide which section holds the "best" state (already loaded into `model`)
@@ -2653,12 +2189,16 @@ def train_flowgen_model(
         # Total losses (scalars)
         results[best_section]["best_train_loss_total"] = round(float(best_train_total), 6)
         results[best_section]["best_val_loss_total"]   = round(float(best_val_total), 6)
+        results[best_section]["best_monitor_loss_total"] = round(float(best_val_total), 6)
 
         # NLL losses from diagnostics (if present)
         train_nll = train_diag.get("loss_nll", None)
         val_nll   = val_diag.get("loss_nll", None)
         results[best_section]["best_train_loss_nll"] = (round(float(train_nll), 6) if train_nll is not None else None)
         results[best_section]["best_val_loss_nll"]   = (round(float(val_nll), 6)   if val_nll   is not None else None)
+        results[best_section]["best_monitor_loss_nll"] = (
+            round(float(val_nll), 6) if val_nll is not None else None
+        )
 
 
         results_path = versioned_dir / f"{versioned_name}_results.yaml"
@@ -2667,8 +2207,43 @@ def train_flowgen_model(
         flowpre_log(f"📝 Saved enriched results to: {results_path}",
                     filename_or_path=log_file_path, verbose=verbose)
 
+        run_context = build_run_context(
+            model_family="flowgen",
+            run_id=versioned_name,
+            seed=seed,
+            config=config,
+            config_path=cfg_path,
+            dataset_name=str(eval_ctx.get("dataset_name", DEFAULT_OFFICIAL_DATASET_NAME)),
+            dataset_manifest_path=eval_ctx.get("dataset_manifest_path", official_raw_bundle_manifest_path()),
+            split_id=str(eval_ctx.get("split_id", "init_temporal_processed_v1")),
+            split_manifest_path=eval_ctx.get("split_manifest_path"),
+            upstream_variant_fingerprint=eval_ctx.get("upstream_variant_fingerprint"),
+            contract_id=eval_ctx.get("contract_id"),
+            comparison_group_id=eval_ctx.get("comparison_group_id"),
+            seed_set_id=eval_ctx.get("seed_set_id"),
+            base_config_id=eval_ctx.get("base_config_id"),
+            objective_metric_id=eval_ctx.get("objective_metric_id"),
+            dataset_level_axes=eval_ctx.get("dataset_level_axes"),
+            run_level_axes=eval_ctx.get("run_level_axes"),
+            split_role_map=eval_ctx.get("split_role_map"),
+            monitoring=monitoring_artifact,
+            test_enabled=bool(split_metrics_test is not None),
+        )
+        _, metrics_long_path = save_canonical_run_artifacts(
+            results=results,
+            context=run_context,
+            out_dir=versioned_dir,
+            stem=versioned_name,
+        )
+        flowpre_log(
+            f"🧾 Saved canonical metrics table to: {metrics_long_path}",
+            filename_or_path=log_file_path,
+            verbose=verbose,
+        )
+        flowpre_log("✅ Postprocess end: save_results", filename_or_path=log_file_path, verbose=verbose)
+
     # Always save the config
-    shutil.copy(ROOT_PATH / "config" / config_filename, versioned_dir / f"{versioned_name}.yaml")
+    shutil.copy(cfg_path, versioned_dir / f"{versioned_name}.yaml")
 
     # =========================
     # Saving models
@@ -2678,6 +2253,7 @@ def train_flowgen_model(
     finetuned_path = None
 
     if train_cfg.get("save_model", False):
+        flowpre_log("🧱 Postprocess start: save_model", filename_or_path=log_file_path, verbose=verbose)
         # Always save Phase-1 (pre-finetune) best
         phase1_path = versioned_dir / f"{versioned_name}_phase1.pt"
         torch.save(phase1_best_state, phase1_path)
@@ -2698,6 +2274,7 @@ def train_flowgen_model(
             torch.save(phase1_best_state, final_path)
             flowpre_log(f"💾 Saved model: {final_path.name} (Phase-1)",
                         filename_or_path=log_file_path, verbose=verbose)
+        flowpre_log("✅ Postprocess end: save_model", filename_or_path=log_file_path, verbose=verbose)
 
     # Log influence only if saved
     if interp_cfg.get("save_influence", False):
@@ -2709,6 +2286,34 @@ def train_flowgen_model(
     flowpre_log(f"✅ Config saved under {versioned_dir}",
                 filename_or_path=log_file_path, verbose=verbose)
 
+    model.run_artifacts = {
+        "run_id": versioned_name,
+        "run_dir": str(versioned_dir),
+        "config_path": str(cfg_path),
+        "saved_config_path": str(versioned_dir / f"{versioned_name}.yaml"),
+        "results_path": None if results_path is None else str(results_path),
+        "metrics_long_path": None if metrics_long_path is None else str(metrics_long_path),
+        "model_path": str(versioned_dir / f"{versioned_name}.pt") if train_cfg.get("save_model", False) else None,
+        "phase1_model_path": None if phase1_path is None else str(phase1_path),
+        "finetuned_model_path": None if finetuned_path is None else str(finetuned_path),
+        "log_file_path": None if log_file_path is None else str(log_file_path),
+        "output_namespace": output_namespace,
+        "output_subdir": output_subdir,
+        "monitoring_policy": monitoring_policy,
+    }
+
+    del optimizer, train_dataset, train_dataloader, base, loss_kwargs
+    del best_model_state, phase1_best_state
+    del split_metrics_train, split_metrics_val, split_metrics_test
+    del influence_dict
+    del x_train, y_train, x_val, y_val, x_test, y_test, c_train, c_val, c_test
+    del feature_names_x, target_names_y
+    if loss_kwargs_ft is not None:
+        del loss_kwargs_ft
+    if results is not None:
+        del results
+    _release_training_memory()
+
     return model
 
 
@@ -2719,12 +2324,19 @@ def train_flowgen_pipeline(
     device: str = "auto",
     seed: int | None = None,
     verbose: bool = True,
+    allow_test_holdout: bool = False,
     *,
     # new knobs (forwarded to train_flowgen_model)
     finetuning: bool = True,
     skip_phase1: bool = False,
     pretrained_model: torch.nn.Module | None = None,
     pretrained_path: str | None = None,
+    evaluation_context: Optional[dict] = None,
+    monitoring_policy: str = OFFICIAL_VAL_POLICY,
+    output_namespace: str | None = None,
+    output_subdir: str | None = None,
+    fixed_run_id: str | None = None,
+    log_in_run_dir: bool = False,
 ):
     """
     Load (X, y, removed) splits, merge X and y on 'post_cleaning_index' to build cXy_*:
@@ -2734,57 +2346,86 @@ def train_flowgen_pipeline(
     If `skip_phase1=True`, only finetuning (Phase-2) will run.
     Optionally provide `pretrained_model` or `pretrained_path` (path to .pt) to start from saved weights.
     """
-    # 1) Load splits
-    (X_train, X_val, X_test,
-     y_train, y_val, y_test,
-     r_train, r_val, r_test) = load_or_create_raw_splits(
-        condition_col=condition_col, verbose=verbose
-    )
+    monitoring_policy = normalize_monitoring_policy(monitoring_policy)
+    ensure_holdout_policy(monitoring_policy, allow_test_holdout=allow_test_holdout)
+    X_train = X_val = X_test = None
+    y_train = y_val = y_test = None
+    r_train = r_val = r_test = None
+    cXy_train = cXy_val = cXy_test = None
+    model = None
 
-    # 2) Merge helper
-    def _build_cXy(X_df: pd.DataFrame, y_df: pd.DataFrame) -> pd.DataFrame:
-        X_df = X_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
-        y_df = y_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
-
-        # y DOES NOT include the condition; merge on index
-        df = pd.merge(
-            X_df, y_df,
-            on="post_cleaning_index",
-            how="inner",
-            validate="one_to_one",
+    try:
+        # 1) Load splits
+        (X_train, X_val, X_test,
+         y_train, y_val, y_test,
+         r_train, r_val, r_test) = load_or_create_raw_splits(
+            condition_col=condition_col, verbose=verbose
         )
 
-        x_cols = [c for c in X_df.columns if c not in ("post_cleaning_index", condition_col)]
-        y_cols = [c for c in y_df.columns if c != "post_cleaning_index"]
+        # 2) Merge helper
+        def _build_cXy(X_df: pd.DataFrame, y_df: pd.DataFrame) -> pd.DataFrame:
+            X_df = X_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
+            y_df = y_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
 
-        ordered = ["post_cleaning_index", condition_col] + x_cols + y_cols
-        return df[ordered].copy()
+            # y DOES NOT include the condition; merge on index
+            df = pd.merge(
+                X_df, y_df,
+                on="post_cleaning_index",
+                how="inner",
+                validate="one_to_one",
+            )
 
-    cXy_train = _build_cXy(X_train, y_train)
-    cXy_val   = _build_cXy(X_val,   y_val)
-    cXy_test  = _build_cXy(X_test,  y_test)
+            x_cols = [c for c in X_df.columns if c not in ("post_cleaning_index", condition_col)]
+            y_cols = [c for c in y_df.columns if c != "post_cleaning_index"]
 
-    # small safety: warn if skipping phase-1 without weights
-    if skip_phase1 and (pretrained_model is None) and (pretrained_path is None):
-        print("⚠️  skip_phase1=True but no pretrained_model/pretrained_path provided; "
-              "will finetune from freshly initialized weights.")
+            ordered = ["post_cleaning_index", condition_col] + x_cols + y_cols
+            return df[ordered].copy()
 
-    # 3) Train
-    model = train_flowgen_model(
-        cXy_train=cXy_train,
-        cXy_val=cXy_val,
-        cXy_test=cXy_test,
-        condition_col=condition_col,
-        config_filename=config_filename,
-        base_name=base_name,
-        device=device,
-        seed=seed,
-        verbose=verbose,
-        finetuning=finetuning,
-        skip_phase1=skip_phase1,
-        pretrained_model=pretrained_model,
-        pretrained_path=pretrained_path,
-    )
-    return model
+        cXy_train = _build_cXy(X_train, y_train)
+        cXy_val = (
+            cXy_train.copy()
+            if monitoring_policy == TRAIN_ONLY_POLICY
+            else _build_cXy(X_val, y_val)
+        )
+        cXy_test = _build_cXy(X_test, y_test) if allow_test_holdout else None
+        r_val_for_training = None if monitoring_policy == TRAIN_ONLY_POLICY else r_val
+
+        # small safety: warn if skipping phase-1 without weights
+        if skip_phase1 and (pretrained_model is None) and (pretrained_path is None):
+            print("⚠️  skip_phase1=True but no pretrained_model/pretrained_path provided; "
+                  "will finetune from freshly initialized weights.")
+
+        # 3) Train
+        model = train_flowgen_model(
+            cXy_train=cXy_train,
+            cXy_val=cXy_val,
+            cXy_test=cXy_test,
+            r_train=r_train,
+            r_val=r_val_for_training,
+            allow_test_holdout=allow_test_holdout,
+            condition_col=condition_col,
+            config_filename=config_filename,
+            base_name=base_name,
+            device=device,
+            seed=seed,
+            verbose=verbose,
+            finetuning=finetuning,
+            skip_phase1=skip_phase1,
+            pretrained_model=pretrained_model,
+            pretrained_path=pretrained_path,
+            evaluation_context=evaluation_context,
+            monitoring_policy=monitoring_policy,
+            output_namespace=output_namespace,
+            output_subdir=output_subdir,
+            fixed_run_id=fixed_run_id,
+            log_in_run_dir=log_in_run_dir,
+        )
+        return model
+    finally:
+        del X_train, X_val, X_test
+        del y_train, y_val, y_test
+        del r_train, r_val, r_test
+        del cXy_train, cXy_val, cXy_test
+        _release_training_memory()
 
 

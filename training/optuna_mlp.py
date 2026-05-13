@@ -1,6 +1,7 @@
 # optuna_mlp.py
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -15,10 +16,15 @@ import yaml
 import optuna
 from optuna.trial import Trial
 
+from evaluation.metrics import (
+    compute_mlp_grouped_loss as _canonical_compute_mlp_grouped_loss,
+    compute_mlp_metrics as _canonical_compute_mlp_metrics,
+    compute_regression_metrics_from_preds as _canonical_compute_regression_metrics_from_preds,
+    select_metric as _canonical_select_metric,
+)
 from training.train_mlp import train_mlp_pipeline
 from training.utils import ROOT_PATH
-from training.utils import load_scaled_sets, list_scaled_sets
-from losses.mlp_loss import _reduce_by_group
+from training.utils import load_scaled_sets, list_scaled_sets, resolve_scaled_set_base
 
 
 
@@ -64,6 +70,38 @@ def _trial_tag(trial: Trial) -> str:
 
 def _now_tag() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _scaled_set_manifest_path(scaled_set_name: str, *, allow_legacy: bool = False) -> Path | None:
+    try:
+        base, _ = resolve_scaled_set_base(
+            scaled_set_name,
+            root=Path(ROOT_PATH),
+            allow_legacy=allow_legacy,
+        )
+    except FileNotFoundError:
+        return None
+
+    candidate = base / "meta" / "manifest.json"
+    if not candidate.exists():
+        return None
+
+    with open(candidate, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    required = {
+        "dataset_name",
+        "split_id",
+        "cleaning_policy_id",
+        "source_dataset_manifest",
+        "counts_by_split",
+        "counts_by_class",
+    }
+    if not isinstance(manifest, dict) or required.difference(manifest.keys()):
+        return None
+    if manifest.get("policy_status") in {"legacy", "legacy_policy"}:
+        return None
+    return candidate
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -203,60 +241,7 @@ def write_trial_config(cfg: Dict[str, Any], trial: Trial, config_dir: Path | Non
 # Metric pick
 # ──────────────────────────────────────────────────────────────────────────────
 def select_val_metric(val_metrics: Dict[str, Any], metric_path: str) -> float:
-    """
-    metric_path examples:
-      "overall.rmse" | "overall.mse" | "overall.rrmse"
-      "per_class.rrmse"         -> sum over classes of per-class["rrmse"]
-      "per_class.0.rmse"        -> metric for a specific class (here class 0)
-    """
-    toks = (metric_path or "").split(".")
-    if not toks:
-        raise KeyError("Empty metric_path.")
-
-    head = toks[0]
-
-    if head == "overall":
-        if len(toks) != 2:
-            raise KeyError(f"Use 'overall.<metric>', got '{metric_path}'.")
-        metric = toks[1]
-        value = val_metrics.get("overall", {}).get(metric, None)
-
-    elif head == "per_class":
-        if len(toks) == 2:
-            # per_class.<metric>  → sum over all classes
-            metric = toks[1]
-            pc = val_metrics.get("per_class", {})
-            if not isinstance(pc, dict) or not pc:
-                raise KeyError("val_metrics['per_class'] missing or empty.")
-            total = 0.0
-            for cls_id, d in pc.items():
-                if metric not in d:
-                    raise KeyError(f"Metric '{metric}' missing for class '{cls_id}'.")
-                total += float(d[metric])
-            value = total
-
-        elif len(toks) == 3:
-            # per_class.<cls>.<metric>  → single class
-            cls_str, metric = toks[1], toks[2]
-            try:
-                cls_id = int(cls_str)
-            except ValueError:
-                raise KeyError(f"Class id must be int, got '{cls_str}'.")
-            pc = val_metrics.get("per_class", {})
-            value = pc.get(cls_id, {}).get(metric, None)
-        else:
-            raise KeyError(f"Use 'per_class.<metric>' or 'per_class.<cls>.<metric>', got '{metric_path}'.")
-
-    else:
-        # Fallback: old dotted lookup (kept for backward-compat)
-        value = _get_by_path(val_metrics, metric_path)
-
-    if value is None:
-        raise KeyError(f"Metric path '{metric_path}' not found in val_metrics.")
-    v = float(value)
-    if not np.isfinite(v):
-        raise ValueError(f"Metric at '{metric_path}' is not finite: {v}")
-    return v
+    return _canonical_select_metric(val_metrics, metric_path)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -349,26 +334,6 @@ def objective_mlp(
     dev = resolve_device(device)
     base_name = f"{base_name_prefix}_{_trial_tag(trial)}"
 
-    # Train (your pipeline returns (model, val_metrics))
-    model_or_tuple = train_mlp_pipeline(
-        condition_col=condition_col,
-        config_filename=cfg_name,
-        base_name=base_name,
-        device=dev,
-        seed=trial_seed,
-        verbose=verbose,
-        X_train=X_train, X_val=X_val, X_test=X_test,
-        y_train=y_train, y_val=y_val, y_test=y_test,
-    )
-
-    if not (isinstance(model_or_tuple, tuple) and len(model_or_tuple) == 2):
-        raise RuntimeError("train_mlp_pipeline must return (model, val_metrics).")
-
-    model, _val_metrics = model_or_tuple
-
-    # --- load y scaler for THIS scaled set (needed to compute objective on real scale) ---
-    # We infer the set name from base_name_prefix which you set as: f"mlp_optuna__{scaled_set_name}"
-    # Example: "mlp_optuna__df_scaled_xrobust_yminmax"
     scaled_set_name = None
     if base_name_prefix.startswith("mlp_optuna__"):
         scaled_set_name = base_name_prefix[len("mlp_optuna__"):]
@@ -385,6 +350,34 @@ def objective_mlp(
             / f"{scaled_set_name}_y_scaler.pkl"
     )
     y_scaler = joblib.load(y_scaler_path)
+    dataset_manifest_path = _scaled_set_manifest_path(scaled_set_name)
+    if dataset_manifest_path is None:
+        raise ValueError(
+            f"Scaled set '{scaled_set_name}' does not have a canonical manifest. "
+            "This workflow is blocked until official derived datasets are regenerated."
+        )
+
+    # Train (your pipeline returns (model, val_metrics))
+    model_or_tuple = train_mlp_pipeline(
+        condition_col=condition_col,
+        config_filename=cfg_name,
+        base_name=base_name,
+        device=dev,
+        seed=trial_seed,
+        verbose=verbose,
+        X_train=X_train, X_val=X_val, X_test=X_test,
+        y_train=y_train, y_val=y_val, y_test=y_test,
+        evaluation_context={
+            "y_scaler": y_scaler,
+            "dataset_name": scaled_set_name,
+            "dataset_manifest_path": dataset_manifest_path,
+        },
+    )
+
+    if not (isinstance(model_or_tuple, tuple) and len(model_or_tuple) == 2):
+        raise RuntimeError("train_mlp_pipeline must return (model, val_metrics).")
+
+    model, _val_metrics = model_or_tuple
 
     # Use same reduction/metric config as training, but evaluated on REAL (inverse-scaled) targets
     train_cfg = cfg.get("training", {})
@@ -571,7 +564,7 @@ def run_mlp_study_pipeline(
 ) -> Tuple[optuna.study.Study, Dict[str, Any], float]:
     """
     One-call pipeline:
-      1) Load X/y train/val/test from data/sets/scaled_sets/<scaled_set_name>.
+      1) Load X/y train/val/test from data/sets/official/<split_id>/scaled/<scaled_set_name>.
       2) Run Optuna study with `run_mlp_study`, printing dataset previews & shapes.
 
     Returns (study, best_params, best_value).
@@ -580,7 +573,7 @@ def run_mlp_study_pipeline(
     available = set(list_scaled_sets())
     if scaled_set_name not in available:
         raise FileNotFoundError(
-            f"Scaled set '{scaled_set_name}' not found under data/sets/scaled_sets/. "
+            f"Canonical scaled set '{scaled_set_name}' not found under data/sets/official/<split_id>/scaled/. "
             f"Available: {sorted(available)}"
         )
 
@@ -626,15 +619,12 @@ def run_mlp_study_pipeline(
     best_model = best_trial.user_attrs.get("model", None)
 
     if best_model is not None:
-        y_scaler_path = (
-                Path(ROOT_PATH)
-                / "data"
-                / "sets"
-                / "scaled_sets"
-                / scaled_set_name
-                / "scalers"
-                / f"{scaled_set_name}_y_scaler.pkl"
+        scaled_base, _ = resolve_scaled_set_base(
+            scaled_set_name,
+            root=Path(ROOT_PATH),
+            allow_legacy=False,
         )
+        y_scaler_path = scaled_base / "scalers" / f"{scaled_set_name}_y_scaler.pkl"
         y_scaler = joblib.load(y_scaler_path)
 
         real_metrics = {
@@ -711,76 +701,15 @@ def compute_real_scale_objective_loss(
     reduction_mode: str,
     regression_group_metric: str,
 ) -> float:
-    """
-    Same loss definition as mlp_loss, but computed on REAL (inverse-scaled) y.
-    Used ONLY for Optuna objective.
-    """
-
-    device = model.device
-    model.eval()
-
-    drop_cols = ["post_cleaning_index", condition_col]
-    if "is_synth" in X_val.columns:
-        drop_cols.append("is_synth")
-
-    x = torch.tensor(
-        X_val.drop(columns=drop_cols).values,
-        dtype=torch.float32,
-        device=device,
+    return _canonical_compute_mlp_grouped_loss(
+        model=model,
+        X=X_val,
+        y=y_val,
+        condition_col=condition_col,
+        reduction_mode=reduction_mode,
+        regression_group_metric=regression_group_metric,
+        y_scaler=y_scaler,
     )
-
-    c = torch.tensor(
-        X_val[condition_col].values,
-        dtype=torch.long,
-        device=device,
-    )
-    y_scaled = torch.tensor(
-        y_val.drop(columns=["post_cleaning_index"]).values,
-        dtype=torch.float32,
-        device=device,
-    )
-
-    with torch.no_grad():
-        y_hat_scaled = model(x, c)
-
-    # ---- inverse scaling ----
-    y_hat_real = torch.tensor(
-        y_scaler.inverse_transform(y_hat_scaled.cpu().numpy()),
-        dtype=torch.float32,
-        device=device,
-    )
-    y_real = torch.tensor(
-        y_scaler.inverse_transform(y_scaled.cpu().numpy()),
-        dtype=torch.float32,
-        device=device,
-    )
-
-    # ---- EXACT SAME BASE AS mlp_loss ----
-    mse_per_sample = torch.mean((y_hat_real - y_real) ** 2, dim=1)
-
-    if regression_group_metric == "mse":
-        loss = _reduce_by_group(
-            mse_per_sample, c,
-            mode=reduction_mode,
-            group_metric="mean",
-        )
-    elif regression_group_metric == "rmse":
-        loss = _reduce_by_group(
-            mse_per_sample, c,
-            mode=reduction_mode,
-            group_metric="rmse",
-        )
-    elif regression_group_metric == "rrmse":
-        loss = _reduce_by_group(
-            mse_per_sample, c,
-            mode=reduction_mode,
-            group_metric="rrmse",
-            y=y_real,
-        )
-    else:
-        raise ValueError(f"Unsupported regression_group_metric '{regression_group_metric}'")
-
-    return float(loss.detach().cpu())
 
 def compute_real_scale_metrics(
     *,
@@ -790,53 +719,12 @@ def compute_real_scale_metrics(
     condition_col: str,
     y_scaler,
 ) -> dict:
-    """
-    Computes full regression metrics (overall, per-class, quantiles)
-    on REAL (inverse-scaled) y.
-    """
-
-    device = model.device
-    model.eval()
-
-    drop_cols = ["post_cleaning_index", condition_col]
-    if "is_synth" in X.columns:
-        drop_cols.append("is_synth")
-
-    x = torch.tensor(
-        X.drop(columns=drop_cols).values,
-        dtype=torch.float32,
-        device=device,
-    )
-    c = torch.tensor(
-        X[condition_col].values,
-        dtype=torch.long,
-        device=device,
-    )
-    y_scaled = torch.tensor(
-        y.drop(columns=["post_cleaning_index"]).values,
-        dtype=torch.float32,
-        device=device,
-    )
-
-    with torch.no_grad():
-        y_hat_scaled = model(x, c)
-
-    # ---- inverse scaling ----
-    y_hat_real = torch.tensor(
-        y_scaler.inverse_transform(y_hat_scaled.cpu().numpy()),
-        dtype=torch.float32,
-        device=device,
-    )
-    y_real = torch.tensor(
-        y_scaler.inverse_transform(y_scaled.cpu().numpy()),
-        dtype=torch.float32,
-        device=device,
-    )
-
-    return compute_regression_metrics_from_preds(
-        y_hat=y_hat_real,
-        y=y_real,
-        c=c,
+    return _canonical_compute_mlp_metrics(
+        model=model,
+        X=X,
+        y=y,
+        condition_col=condition_col,
+        y_scaler=y_scaler,
     )
 
 
@@ -846,129 +734,4 @@ def compute_regression_metrics_from_preds(
     y: torch.Tensor,
     c: torch.Tensor,
 ) -> dict:
-    """
-    Computes full regression metrics (overall, per-class, quantiles)
-    assuming y_hat and y are on the SAME scale.
-    """
-
-    quantile_ranges = {
-        "0_50": (0.0, 0.5),
-        "0_75": (0.0, 0.75),
-        "25_75": (0.25, 0.75),
-        "10_90": (0.10, 0.90),
-        "5_95": (0.05, 0.95),
-        "90_100": (0.90, 1.0),
-    }
-
-    def _quantile_metrics(err, y):
-        abs_err = torch.abs(err)
-        out = {}
-
-        for qname, (qlo, qhi) in quantile_ranges.items():
-            lo = torch.quantile(abs_err, qlo)
-            hi = torch.quantile(abs_err, qhi)
-
-            m = (abs_err >= lo) & (abs_err <= hi)
-            if not torch.any(m):
-                continue
-
-            e = err[m]
-            yt = y[m]
-
-            mse = float(torch.mean(e ** 2))
-            rmse = float(torch.sqrt(torch.mean(e ** 2) + 1e-12))
-            rrmse = float(
-                (torch.sqrt(torch.mean(e ** 2)) /
-                 (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
-            )
-            mae = float(torch.mean(torch.abs(e)))
-            medae = float(torch.median(torch.abs(e)))
-            mape = float(torch.mean(torch.abs(e) / torch.clamp(torch.abs(yt), min=1e-8)).item())
-
-            yt_mu = yt.mean(dim=0)
-            ss_res = torch.sum((yt - (yt - e)) ** 2)
-            ss_tot = torch.sum((yt - yt_mu) ** 2)
-            r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
-
-            out[qname] = {
-                "mse": mse,
-                "rmse": rmse,
-                "rrmse": rrmse,
-                "mae": mae,
-                "medae": medae,
-                "mape": mape,
-                "r2": r2,
-                "n": int(m.sum().item()),
-            }
-
-        return out
-
-    err = y_hat - y
-
-    mse = float(torch.mean(err ** 2))
-    rmse = float(torch.sqrt(torch.tensor(mse) + 1e-12))
-    rrmse = float(
-        (torch.sqrt(torch.mean(err ** 2)) /
-         (torch.sqrt(torch.mean(y ** 2)) + 1e-12)).item()
-    )
-    mae = float(torch.mean(torch.abs(err)))
-    medae = float(torch.median(torch.abs(err)))
-    mape = float(torch.mean(torch.abs(err) / torch.clamp(torch.abs(y), min=1e-8)).item())
-
-    y_mu = y.mean(dim=0)
-    ss_res = torch.sum((y - y_hat) ** 2)
-    ss_tot = torch.sum((y - y_mu) ** 2)
-    r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
-
-    quantiles_overall = _quantile_metrics(err, y)
-
-    out_pc = {}
-    for cls in torch.unique(c):
-        m = (c == cls)
-        if not torch.any(m):
-            continue
-
-        yh = y_hat[m]
-        yt = y[m]
-        e = yh - yt
-
-        mse_c = float(torch.mean(e ** 2))
-        rmse_c = float(torch.sqrt(torch.mean(e ** 2) + 1e-12))
-        rrmse_c = float(
-            (torch.sqrt(torch.mean(e ** 2)) /
-             (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
-        )
-        mae_c = float(torch.mean(torch.abs(e)))
-        medae_c = float(torch.median(torch.abs(e)))
-        mape_c = float(torch.mean(torch.abs(e) / torch.clamp(torch.abs(yt), min=1e-8)).item())
-
-        yt_mu = yt.mean(dim=0)
-        ss_res_c = torch.sum((yt - yh) ** 2)
-        ss_tot_c = torch.sum((yt - yt_mu) ** 2)
-        r2_c = float(1.0 - ss_res_c / (ss_tot_c + 1e-12))
-
-        out_pc[int(cls.item())] = {
-            "mse": mse_c,
-            "rmse": rmse_c,
-            "rrmse": rrmse_c,
-            "mae": mae_c,
-            "medae": medae_c,
-            "mape": mape_c,
-            "r2": r2_c,
-            "n": int(m.sum().item()),
-            "quantiles": _quantile_metrics(e, yt),
-        }
-
-    return {
-        "overall": {
-            "mse": mse,
-            "rmse": rmse,
-            "rrmse": rrmse,
-            "mae": mae,
-            "medae": medae,
-            "mape": mape,
-            "r2": r2,
-            "quantiles": quantiles_overall,
-        },
-        "per_class": out_pc,
-    }
+    return _canonical_compute_regression_metrics_from_preds(y_hat=y_hat, y=y, c=c)

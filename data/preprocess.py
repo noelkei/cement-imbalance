@@ -254,7 +254,7 @@ def sum_columns(
 
     return df_out
 
-def apply_cleaning_pipeline(
+def apply_deterministic_preprocessing(
     df: pd.DataFrame,
     ranges: dict[str, dict],
     drop_invalid: bool = True,
@@ -297,8 +297,11 @@ def apply_cleaning_pipeline(
             df_out, cols=cols, name=sum_col_name, verbose=verbose
         )
 
-    # Step 4: After all sums are created, filter outliers using original df
-    log("\n📉 Applying joint percentile-based filtering for all 'sum_' columns...", verbose)
+    # Step 4: Domain quality filter on compositional sums.
+    # This stays in the global deterministic preprocessing stage because it is
+    # treated as an accepted physical/chemical consistency check, not as the
+    # learned statistical cleaning that is fit later on the official TRAIN split.
+    log("\n📉 Applying domain quality filtering for all 'sum_' columns...", verbose)
     combined_mask = pd.Series([False] * len(df_out), index=df_out.index)
 
     for col in df_out.columns:
@@ -323,6 +326,30 @@ def apply_cleaning_pipeline(
 
     log(f"\n✅ Cleaning pipeline completed. Final shape: {df_out.shape}", verbose)
     return df_out
+
+
+def apply_cleaning_pipeline(
+    df: pd.DataFrame,
+    ranges: dict[str, dict],
+    drop_invalid: bool = True,
+    verbose: bool = True,
+    threshold: float = 0.995,
+    excluded_cols: list[str] = None,
+) -> pd.DataFrame:
+    """
+    Legacy alias kept for backward compatibility.
+
+    F3 canonical usage should prefer `apply_deterministic_preprocessing()` to
+    make it explicit that this stage does not learn from the official split.
+    """
+    return apply_deterministic_preprocessing(
+        df=df,
+        ranges=ranges,
+        drop_invalid=drop_invalid,
+        verbose=verbose,
+        threshold=threshold,
+        excluded_cols=excluded_cols,
+    )
 
 def filter_by_type_and_summarize(
     df: pd.DataFrame,

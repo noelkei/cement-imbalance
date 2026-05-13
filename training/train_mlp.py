@@ -2,7 +2,7 @@
 import os, math, json, shutil, random, secrets
 from copy import deepcopy
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Union, Literal
+from typing import Any, Optional, Tuple, List, Dict, Union, Literal
 
 import numpy as np
 import pandas as pd
@@ -17,7 +17,11 @@ from training.utils import (
     setup_training_logs_and_dirs,
     log_epoch_diagnostics,
 )
-from data.sets import load_or_create_raw_splits
+from data.sets import (
+    DEFAULT_OFFICIAL_DATASET_NAME,
+    load_or_create_raw_splits,
+    official_raw_bundle_manifest_path,
+)
 
 from losses.mlp_loss import mlp_loss
 
@@ -25,6 +29,9 @@ from typing import List, Tuple, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+
+from evaluation.metrics import compute_mlp_metrics
+from evaluation.results import build_run_context, save_canonical_run_artifacts
 
 class BalancedBatchSampler(torch.utils.data.Sampler):
     """
@@ -547,6 +554,47 @@ def compute_shap_values_for_mlp(
     return np.array(shap_vals)
 
 
+def _default_objective_metric_id(*, has_raw_real_metrics: bool) -> str:
+    return "raw_real.macro.rrmse" if has_raw_real_metrics else "val.macro.rrmse"
+
+
+def _build_mlp_run_level_axes(
+    *,
+    dataloader_mode: str,
+    cycle_reals: bool,
+    allow_synth: bool,
+    reduction_mode: str,
+    reg_group_metric: str,
+    objective_metric_id: str,
+) -> dict[str, Any]:
+    return {
+        "batch_policy": {
+            "id": dataloader_mode,
+            "implemented_now": True,
+        },
+        "cycling_policy": {
+            "cycle_reals": bool(cycle_reals),
+            "implemented_now": True,
+        },
+        "allow_synth": {
+            "enabled": bool(allow_synth),
+            "implemented_now": True,
+            "default_frozen_in_base_config": True,
+        },
+        "loss_policy": {
+            "loss_reduction": reduction_mode,
+            "regression_group_metric": reg_group_metric,
+            "implemented_now": True,
+        },
+        "objective_metric": {
+            "id": objective_metric_id,
+            "implemented_now_scope": "post_run_selection",
+            "trainer_early_stopping_metric": "val_loss",
+            "trainer_objective_metric_supported": False,
+        },
+    }
+
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Training
 # ───────────────────────────────────────────────────────────────────────────────
@@ -556,11 +604,13 @@ def train_mlp_model(
     condition_col: str,
     *,
     cXy_test: pd.DataFrame | None = None,
+    allow_test_holdout: bool = False,
     seed: int | None = None,
     config_filename: str = "mlp.yaml",
     base_name: str = "mlp",
     device: str = "cuda",
     verbose: bool = True,
+    evaluation_context: Optional[Dict[str, Any]] = None,
 ):
     """
     Trains ContextMLPRegressor on (X, y) with explicit context c.
@@ -588,6 +638,7 @@ def train_mlp_model(
     model_cfg = config["model"]
     train_cfg = config["training"]
     interp_cfg = config.get("interpretability", {})
+    contract_cfg = config.get("contract", {})
 
     dev = torch.device("cuda" if device.lower() == "cuda" and torch.cuda.is_available() else "cpu")
 
@@ -818,139 +869,104 @@ def train_mlp_model(
     # Load best
     model.load_state_dict(best_state)
 
-    # ── Final metrics (overall + per-class) on train/val/(test)
-    def _metrics_split(x, y, c) -> dict:
-        model.eval()
-        with torch.no_grad():
+    eval_ctx = dict(evaluation_context or {})
+    y_scaler = eval_ctx.get("y_scaler")
 
-            quantile_ranges = {
-                "0_50": (0.0, 0.5),
-                "0_75": (0.0, 0.75),
-                "25_75": (0.25, 0.75),
-                "10_90": (0.10, 0.90),
-                "5_95": (0.05, 0.95),
-                "90_100": (0.90, 1.0),
-            }
+    def _split_frames(df: pd.DataFrame | None) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+        if df is None:
+            return None, None
+        x_cols = ["post_cleaning_index", condition_col]
+        if "is_synth" in df.columns:
+            x_cols.append("is_synth")
+        x_cols.extend([c for c in feature_names_x if c in df.columns])
+        y_cols = ["post_cleaning_index"] + list(target_names)
+        return df[x_cols].copy(), df[y_cols].copy()
 
-            def _quantile_metrics(err, y, quantile_ranges):
-                abs_err = torch.abs(err)
-                out = {}
+    X_train_eval, y_train_eval = _split_frames(cXy_train)
+    X_val_eval, y_val_eval = _split_frames(cXy_val)
+    X_test_eval, y_test_eval = _split_frames(cXy_test if allow_test_holdout else None)
 
-                for qname, (qlo, qhi) in quantile_ranges.items():
-                    lo = torch.quantile(abs_err, qlo)
-                    hi = torch.quantile(abs_err, qhi)
+    train_metrics = compute_mlp_metrics(
+        model=model,
+        X=X_train_eval,
+        y=y_train_eval,
+        condition_col=condition_col,
+    )
+    val_metrics = compute_mlp_metrics(
+        model=model,
+        X=X_val_eval,
+        y=y_val_eval,
+        condition_col=condition_col,
+    )
+    test_metrics = (
+        compute_mlp_metrics(
+            model=model,
+            X=X_test_eval,
+            y=y_test_eval,
+            condition_col=condition_col,
+        )
+        if X_test_eval is not None and y_test_eval is not None
+        else None
+    )
 
-                    m = (abs_err >= lo) & (abs_err <= hi)
-                    if not torch.any(m):
-                        continue
-
-                    e = err[m]
-                    yt = y[m]
-
-                    mse = float(torch.mean(e ** 2))
-                    rmse = float(torch.sqrt(torch.mean(e ** 2) + 1e-12))
-                    rrmse = float(
-                        (torch.sqrt(torch.mean(e ** 2)) /
-                         (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
-                    )
-                    mae = float(torch.mean(torch.abs(e)))
-                    medae = float(torch.median(torch.abs(e)))
-                    mape = float(torch.mean(torch.abs(e) / (torch.clamp(torch.abs(yt), min=1e-8))).item())
-
-                    yt_mu = yt.mean(dim=0)
-                    ss_res = torch.sum(e ** 2)
-                    ss_tot = torch.sum((yt - yt_mu) ** 2)
-                    r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
-
-                    out[qname] = {
-                        "mse": mse,
-                        "rmse": rmse,
-                        "rrmse": rrmse,
-                        "mae": mae,
-                        "medae": medae,
-                        "mape": mape,
-                        "r2": r2,
-                        "n": int(m.sum().item()),
-                    }
-
-                return out
-
-            y_hat = model(x, c)
-
-            err = y_hat - y
-            mse = float(torch.mean(err ** 2))
-            rmse = float(torch.sqrt(torch.tensor(mse) + 1e-12))
-            rrmse = float(
-                (torch.sqrt(torch.mean(err ** 2)) /
-                 (torch.sqrt(torch.mean(y ** 2)) + 1e-12)).item()
-            )
-            mae = float(torch.mean(torch.abs(err)))
-            medae = float(torch.median(torch.abs(err)))
-            mape = float(torch.mean(torch.abs(err) / (torch.clamp(torch.abs(y), min=1e-8))).item())
-
-            y_mu = y.mean(dim=0)
-            ss_res = torch.sum((y - y_hat) ** 2)
-            ss_tot = torch.sum((y - y_mu) ** 2)
-            r2 = float(1.0 - ss_res / (ss_tot + 1e-12))
-
-            quantiles_overall = _quantile_metrics(err, y, quantile_ranges)
-
-            # per-class
-            out_pc = {}
-            for cls in torch.unique(c):
-                m = (c == cls)
-                if not torch.any(m):
-                    continue
-                yh = y_hat[m];
-                yt = y[m]
-                e = yh - yt
-                mse_c = float(torch.mean(e ** 2))
-                rmse_c = float(torch.sqrt(torch.mean(e ** 2) + 1e-12))
-                rrmse_c = float(
-                    (torch.sqrt(torch.mean(e ** 2)) /
-                     (torch.sqrt(torch.mean(yt ** 2)) + 1e-12)).item()
-                )
-                mae_c = float(torch.mean(torch.abs(e)))
-                medae_c = float(torch.median(torch.abs(e)))
-
-                mape_c = float(torch.mean(torch.abs(e) / (torch.clamp(torch.abs(yt), min=1e-8))).item())
-
-                yt_mu = yt.mean(dim=0)
-                ss_res_c = torch.sum((yt - yh) ** 2)
-                ss_tot_c = torch.sum((yt - yt_mu) ** 2)
-                r2_c = float(1.0 - ss_res_c / (ss_tot_c + 1e-12))
-
-                quantiles_c = _quantile_metrics(e, yt, quantile_ranges)
-
-                out_pc[int(cls.item())] = {
-                    "mse": mse_c,
-                    "rmse": rmse_c,
-                    "rrmse": rrmse_c,
-                    "mae": mae_c,
-                    "medae": medae_c,
-                    "mape": mape_c,
-                    "r2": r2_c,
-                    "n": int(m.sum().item()),
-                    "quantiles": quantiles_c,
-
-                }
-
-        overall = {
-            "mse": mse,
-            "rmse": rmse,
-            "rrmse": rrmse,
-            "mae": mae,
-            "medae": medae,
-            "mape": mape,
-            "r2": r2,
-            "quantiles": quantiles_overall,
+    raw_real_metrics = None
+    if y_scaler is not None:
+        raw_real_metrics = {
+            "train": compute_mlp_metrics(
+                model=model,
+                X=X_train_eval,
+                y=y_train_eval,
+                condition_col=condition_col,
+                y_scaler=y_scaler,
+            ),
+            "val": compute_mlp_metrics(
+                model=model,
+                X=X_val_eval,
+                y=y_val_eval,
+                condition_col=condition_col,
+                y_scaler=y_scaler,
+            ),
         }
+        if X_test_eval is not None and y_test_eval is not None:
+            raw_real_metrics["test"] = compute_mlp_metrics(
+                model=model,
+                X=X_test_eval,
+                y=y_test_eval,
+                condition_col=condition_col,
+                y_scaler=y_scaler,
+            )
 
-        return {"overall": overall, "per_class": out_pc}
-
-    train_metrics = _metrics_split(x_train, y_train, c_train)
-    val_metrics   = _metrics_split(x_val, y_val, c_val)
-    test_metrics  = _metrics_split(x_test, y_test, c_test) if (x_test is not None) else None
+    objective_metric_id = str(
+        eval_ctx.get(
+            "objective_metric_id",
+            contract_cfg.get(
+                "objective_metric_id",
+                _default_objective_metric_id(has_raw_real_metrics=raw_real_metrics is not None),
+            ),
+        )
+    )
+    base_config_id = (
+        eval_ctx.get("mlp_base_config_id")
+        or eval_ctx.get("base_config_id")
+        or contract_cfg.get("mlp_base_config_id")
+        or Path(config_filename).stem
+    )
+    comparison_contract = {
+        "contract_id": eval_ctx.get("contract_id", contract_cfg.get("closure_contract_id")),
+        "comparison_group_id": eval_ctx.get("comparison_group_id"),
+        "seed_set_id": eval_ctx.get("seed_set_id", contract_cfg.get("seed_set_id")),
+        "base_config_id": str(base_config_id),
+        "objective_metric_id": objective_metric_id,
+        "dataset_level_axes": eval_ctx.get("dataset_level_axes"),
+        "run_level_axes": _build_mlp_run_level_axes(
+            dataloader_mode=dataloader_mode,
+            cycle_reals=cycle_reals,
+            allow_synth=allow_synth,
+            reduction_mode=reduction_mode,
+            reg_group_metric=reg_group_metric,
+            objective_metric_id=objective_metric_id,
+        ),
+    }
 
     tm, vm = train_metrics["overall"], val_metrics["overall"]
     flowpre_log(
@@ -1019,19 +1035,62 @@ def train_mlp_model(
             "val_best_loss": round(best_val, 6),
             "train": train_metrics,
             "val": val_metrics,
-            "test": test_metrics,
+            "raw_real": raw_real_metrics,
+            "metric_spaces": {
+                "default": "raw_real" if raw_real_metrics is not None else "native",
+                "available": ["native"] + (["raw_real"] if raw_real_metrics is not None else []),
+            },
             "loss_reduction": reduction_mode,
             "regression_group_metric": reg_group_metric,
             "task": task,
             "feature_names_x": feature_names_x,
             "target_names": target_names,
             "shap": shap_results,
+            "comparison_contract": comparison_contract,
         }
+        if test_metrics is not None:
+            results["test"] = test_metrics
         results_path = versioned_dir / f"{versioned_name}_results.yaml"
         import yaml
         with open(results_path, "w") as f:
             yaml.dump(results, f, sort_keys=False)
         flowpre_log(f"📝 Saved results to: {results_path}", filename_or_path=log_file_path, verbose=verbose)
+
+        cfg_path = Path(config_filename)
+        if not cfg_path.is_absolute():
+            cfg_path = ROOT_PATH / "config" / cfg_path
+
+        run_context = build_run_context(
+            model_family="mlp",
+            run_id=versioned_name,
+            seed=seed,
+            config=config,
+            config_path=cfg_path,
+            dataset_name=str(eval_ctx.get("dataset_name", DEFAULT_OFFICIAL_DATASET_NAME)),
+            dataset_manifest_path=eval_ctx.get("dataset_manifest_path", official_raw_bundle_manifest_path()),
+            split_id=str(eval_ctx.get("split_id", "init_temporal_processed_v1")),
+            split_manifest_path=eval_ctx.get("split_manifest_path"),
+            upstream_variant_fingerprint=eval_ctx.get("upstream_variant_fingerprint"),
+            contract_id=comparison_contract["contract_id"],
+            comparison_group_id=comparison_contract["comparison_group_id"],
+            seed_set_id=comparison_contract["seed_set_id"],
+            base_config_id=comparison_contract["base_config_id"],
+            objective_metric_id=comparison_contract["objective_metric_id"],
+            dataset_level_axes=comparison_contract["dataset_level_axes"],
+            run_level_axes=comparison_contract["run_level_axes"],
+            test_enabled=bool(test_metrics is not None and allow_test_holdout),
+        )
+        _, metrics_long_path = save_canonical_run_artifacts(
+            results=results,
+            context=run_context,
+            out_dir=versioned_dir,
+            stem=versioned_name,
+        )
+        flowpre_log(
+            f"🧾 Saved canonical metrics table to: {metrics_long_path}",
+            filename_or_path=log_file_path,
+            verbose=verbose,
+        )
 
     # Save model(s)
     if bool(train_cfg.get("save_model", False)):
@@ -1056,6 +1115,7 @@ def train_mlp_pipeline(
     device: str = "cuda",
     seed: int | None = None,
     verbose: bool = True,
+    allow_test_holdout: bool = False,
     *,
     # Optional external splits
     X_train: pd.DataFrame | None = None,
@@ -1064,6 +1124,7 @@ def train_mlp_pipeline(
     y_train: pd.DataFrame | None = None,
     y_val:   pd.DataFrame | None = None,
     y_test:  pd.DataFrame | None = None,
+    evaluation_context: Optional[Dict[str, Any]] = None,
 ):
     """
     If all three X and all three y splits are provided, use them.
@@ -1074,6 +1135,13 @@ def train_mlp_pipeline(
     have_all_user_splits = all(
         df is not None for df in (X_train, X_val, X_test, y_train, y_val, y_test)
     )
+    eval_ctx = dict(evaluation_context or {})
+
+    if have_all_user_splits and not eval_ctx.get("dataset_manifest_path"):
+        raise ValueError(
+            "External dataset splits require evaluation_context['dataset_manifest_path'] so the run "
+            "is not incorrectly attributed to the official raw bundle."
+        )
 
     if not have_all_user_splits:
         # fallback to your loader (r_* not needed anymore)
@@ -1103,17 +1171,19 @@ def train_mlp_pipeline(
 
     cXy_tr = _build_cXy(X_train, y_train)
     cXy_va = _build_cXy(X_val,   y_val)
-    cXy_te = _build_cXy(X_test,  y_test)
+    cXy_te = _build_cXy(X_test,  y_test) if allow_test_holdout else None
 
     return train_mlp_model(
         cXy_train=cXy_tr,
         cXy_val=cXy_va,
         cXy_test=cXy_te,
         condition_col=condition_col,
+        allow_test_holdout=allow_test_holdout,
         config_filename=config_filename,
         base_name=base_name,
         device=device,
         seed=seed,
         verbose=verbose,
+        evaluation_context=eval_ctx,
     )
 

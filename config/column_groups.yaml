@@ -1,0 +1,34 @@
+groups:
+  chem:
+    public_chem_feature_01: chem_01
+    public_chem_feature_02: chem_02
+    public_chem_feature_03: chem_03
+    public_chem_feature_04: chem_04
+    public_chem_feature_05: chem_05
+    public_chem_feature_06: chem_06
+    public_chem_feature_07: chem_07
+    public_chem_feature_08: chem_08
+    public_chem_feature_09: chem_09
+    public_chem_feature_10: chem_10
+    public_chem_feature_11: chem_11
+
+  phase:
+    public_phase_feature_01: phase_01
+    public_phase_feature_02: phase_02
+    public_phase_feature_03: phase_03
+    public_phase_feature_04: phase_04
+    public_phase_feature_05: phase_05
+    public_phase_feature_06: phase_06
+    public_phase_feature_07: phase_07
+    public_phase_feature_08: phase_08
+    public_phase_feature_09: phase_09
+    public_phase_feature_10: phase_10
+    public_phase_feature_11: phase_11
+    public_phase_feature_12: phase_12
+    public_phase_feature_13: phase_13
+
+  chem_ratios:
+    public_chem_ratio_01: chem_ratio_02_07
+
+  phase_ratios:
+    public_phase_ratio_01: phase_ratio_03_01

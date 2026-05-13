@@ -4,122 +4,65 @@ import pandas as pd
 from models.flow_pre import FlowPre
 from training.utils import load_yaml_config
 from training.utils import ROOT_PATH
-from training.utils import flowpre_log, setup_training_logs_and_dirs, log_epoch_diagnostics
+from training.utils import flowpre_log, setup_training_logs_and_dirs, log_epoch_diagnostics, select_training_device
 import shutil
 import re
 import math
 import json
+import gc
+from pathlib import Path
 import numpy as np
 from copy import deepcopy
 import yaml
-from data.sets import load_or_create_raw_splits
+from data.sets import (
+    DEFAULT_OFFICIAL_DATASET_NAME,
+    load_or_create_raw_splits,
+    official_raw_bundle_manifest_path,
+)
 # 🔍 Sanity check base distribution manually
 from nflows.distributions.normal import StandardNormal
 
+from evaluation.metrics import (
+    compute_flowpre_iso_rrmse_per_class as _canonical_compute_flowpre_iso_rrmse_per_class,
+    compute_flowpre_latent_isotropy_stats as _canonical_compute_flowpre_latent_isotropy_stats,
+    compute_flowpre_latent_isotropy_stats_per_class as _canonical_compute_flowpre_latent_isotropy_stats_per_class,
+    compute_flowpre_split_metrics,
+    format_iso_dict as _canonical_format_iso_dict,
+    latent_isotropy_stats_from_z as _canonical_latent_isotropy_stats_from_z,
+)
+from evaluation.results import build_run_context, save_canonical_run_artifacts
+from training.monitoring import (
+    OFFICIAL_VAL_POLICY,
+    TRAIN_ONLY_POLICY,
+    ensure_holdout_policy,
+    experimental_output_namespace,
+    normalize_monitoring_policy,
+    with_monitoring_context,
+)
 from losses.flow_pre_loss import flexible_flow_loss_from_model
 
 from typing import Optional, Tuple
 
-from scipy.stats import skew, kurtosis, chi2, kstest
 import os, random, secrets
 
 def _latent_isotropy_stats_from_z(z_np: np.ndarray) -> dict:
-    """
-    Diagnostics on latent matrix z (N, D):
-      - skewness_mean: mean |skew| across dims (target 0)
-      - kurtosis_mean: mean Pearson kurtosis across dims (target ~3)
-      - mahalanobis_mean/median: on distances
-      - mahalanobis_ks_p: KS p-value of d^2 vs ChiSquare(D)
-      - eigval_std: std of covariance eigenvalues (lower ~ more isotropic)
-    """
-    N, D = z_np.shape
-    sk = skew(z_np, axis=0, bias=False)                     # target ~ 0
-    ku = kurtosis(z_np, axis=0, fisher=False, bias=False)   # target ~ 3 (Pearson)
-
-    skewness_mean = float(np.mean(np.abs(sk)))
-    kurtosis_mean = float(np.mean(ku))
-
-    cov = np.cov(z_np, rowvar=False)
-    eps = 1e-6
-    cov_reg = cov + eps * np.eye(cov.shape[0], dtype=cov.dtype)
-    evals = np.linalg.eigvalsh(cov_reg)
-    eigval_std = float(np.std(evals))
-
-    mu = z_np.mean(axis=0, keepdims=True)
-    w, V = np.linalg.eigh(cov_reg)
-    w_inv_sqrt = np.diag(1.0 / np.sqrt(w))
-    z_whitened = (z_np - mu) @ V @ w_inv_sqrt
-    d2 = np.sum(z_whitened**2, axis=1)
-    d = np.sqrt(d2)
-
-    mahalanobis_mean = float(np.mean(d))
-    mahalanobis_median = float(np.median(d))
-    ks_stat, ks_p = kstest(d2, chi2(df=D).cdf)
-    mahalanobis_ks_p = float(ks_p)
-
-    return {
-        "skewness_mean": skewness_mean,
-        "kurtosis_mean": kurtosis_mean,
-        "mahalanobis_mean": mahalanobis_mean,
-        "mahalanobis_median": mahalanobis_median,
-        "mahalanobis_ks_p": mahalanobis_ks_p,
-        "eigval_std": eigval_std,
-    }
+    return _canonical_latent_isotropy_stats_from_z(z_np)
 
 
 def _latent_isotropy_stats(model, x: torch.Tensor, c: torch.Tensor) -> dict:
-    """Use FlowPre.forward(x, c) to get z, then compute whole-set diagnostics."""
-    model.eval()
-    with torch.no_grad():
-        z, _ = model.forward(x, c)   # ✅ matches your FlowPre API
-    return _latent_isotropy_stats_from_z(z.detach().cpu().numpy())
+    return _canonical_compute_flowpre_latent_isotropy_stats(model, x, c)
 
 
 def _latent_isotropy_stats_per_class(model, x: torch.Tensor, c: torch.Tensor) -> dict[int, dict]:
-    """Per-class diagnostics with sample counts."""
-    model.eval()
-    out = {}
-    with torch.no_grad():
-        for cls in torch.unique(c):
-            m = (c == cls)
-            if not m.any():
-                continue
-            z, _ = model.forward(x[m], c[m])  # ✅ same API
-            stats = _latent_isotropy_stats_from_z(z.detach().cpu().numpy())
-            stats["n"] = int(m.sum().item())
-            out[int(cls.item())] = {k: (float(v) if isinstance(v, (np.floating,)) else v)
-                                    for k, v in stats.items()}
-    return out
+    return _canonical_compute_flowpre_latent_isotropy_stats_per_class(model, x, c)
 
 
 # --- Helper: compute per-class isotropy RRMSE (from loss function outputs) ---
 def _iso_rrmse_per_class_from_loss(model, x, c, loss_kwargs):
-    """
-    For each class label in c, run flexible_flow_loss_from_model on the subset and
-    collect (rrmse_mean, rrmse_std) that quantify how close z_mean→0 and z_std→1 are.
-    Returns: dict[int, dict]
-    """
-    model.eval()
-    per_class = {}
-    with torch.no_grad():
-        classes = torch.unique(c)
-        for cls in classes:
-            m = (c == cls)
-            if not m.any():
-                continue
-            # Call your loss exactly as in training/validation, on the masked subset
-            _, _, (rrmse_mean, rrmse_std) = flexible_flow_loss_from_model(
-                model, x[m], c[m], **loss_kwargs
-            )
-            per_class[int(cls.item())] = {
-                "rrmse_mean": round(float(rrmse_mean), 6),
-                "rrmse_std":  round(float(rrmse_std), 6),
-                "n": int(m.sum().item())
-            }
-    return per_class
+    return _canonical_compute_flowpre_iso_rrmse_per_class(model, x, c, loss_kwargs)
 
 def _format_iso_dict(iso_dict: dict[int, dict]) -> str:
-    return {k: (v['rrmse_mean'], v['rrmse_std'], v['n']) for k, v in iso_dict.items()}.__str__()
+    return _canonical_format_iso_dict(iso_dict)
 
 
 def filter_flowpre_columns(df: pd.DataFrame, cols_to_exclude: list[str], condition_col: str) -> pd.DataFrame:
@@ -176,7 +119,13 @@ def compute_latent_feature_influence(
     sweep_min, sweep_max = sweep_range
     total_range = abs(sweep_max - sweep_min)
     num_steps = int(round(1 / influence_step_fraction)) + 1
-    sweep_vals = torch.linspace(sweep_min, sweep_max, steps=num_steps)
+    sweep_vals = torch.linspace(
+        sweep_min,
+        sweep_max,
+        steps=num_steps,
+        dtype=base_z.dtype,
+        device=base_z.device,
+    )
 
     for i in range(z.shape[1]):
         z_sweep = base_z.repeat(num_steps, 1)
@@ -354,16 +303,44 @@ def _maybe_set_seed(seed: int | None) -> int:
     return int(seed)
 
 
+def _state_dict_to_cpu(state_dict: dict) -> dict:
+    cpu_state: dict = {}
+    for key, value in state_dict.items():
+        if torch.is_tensor(value):
+            cpu_state[key] = value.detach().cpu().clone()
+        else:
+            cpu_state[key] = deepcopy(value)
+    return cpu_state
+
+
+def _release_training_memory() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+
+
 def train_flowpre_model(
         X_train: pd.DataFrame,
         X_val: pd.DataFrame,
         condition_col: str,
         X_test: pd.DataFrame | None = None,
+        allow_test_holdout: bool = False,
         seed: int | None = None,
         config_filename: str = "flow_pre",
         base_name: str = "flow_pre_v1",
-        device: str = "cuda",
-        verbose: bool = True
+        device: str = "auto",
+        verbose: bool = True,
+        evaluation_context: Optional[dict] = None,
+        output_namespace: str | None = None,
+        output_subdir: str | None = None,
+        fixed_run_id: str | None = None,
+        log_in_run_dir: bool = False,
+        monitoring_policy: str = OFFICIAL_VAL_POLICY,
 ):
     """
     Train a conditional normalizing flow on X_train with validation on X_val using FlowPre.
@@ -380,12 +357,31 @@ def train_flowpre_model(
 
     seed = _maybe_set_seed(seed)
 
-    config = load_yaml_config(config_filename)
+    cfg_path = Path(config_filename)
+    if not cfg_path.parent or cfg_path.parent == Path("."):
+        cfg_path = ROOT_PATH / "config" / cfg_path
+    if not cfg_path.suffix:
+        cfg_path = cfg_path.with_suffix(".yaml")
+
+    config = load_yaml_config(cfg_path)
     model_cfg = config["model"]
     train_cfg = config["training"]
     interp_cfg = config.get("interpretability", {})
+    monitoring_policy = normalize_monitoring_policy(monitoring_policy)
+    ensure_holdout_policy(monitoring_policy, allow_test_holdout=allow_test_holdout)
+    eval_ctx, monitoring_info = with_monitoring_context(evaluation_context, monitoring_policy)
+    monitoring_artifact = monitoring_info if monitoring_policy == TRAIN_ONLY_POLICY else None
+    output_namespace = experimental_output_namespace(output_namespace, monitoring_policy)
+    monitor_label = "Train-monitor" if monitoring_policy == TRAIN_ONLY_POLICY else "Val"
+    improvement_label = "Monitor Improvement" if monitoring_policy == TRAIN_ONLY_POLICY else "Validation Improvement"
+    best_loss_label = "Best monitor loss" if monitoring_policy == TRAIN_ONLY_POLICY else "Best validation loss"
+    loss_tag = "monitorloss" if monitoring_policy == TRAIN_ONLY_POLICY else "valloss"
+    if monitoring_policy == TRAIN_ONLY_POLICY:
+        X_val = X_train.copy()
+    if not allow_test_holdout:
+        X_test = None
 
-    device = torch.device("cuda" if device.lower() == "cuda" and torch.cuda.is_available() else "cpu")
+    device = select_training_device(device)
 
     # Use helper to validate inputs and prepare tensors + loader
     x_train, c_train, x_val, c_val, x_test, c_test, feature_names, dataset, dataloader = prepare_flowpre_dataloader(
@@ -474,17 +470,36 @@ def train_flowpre_model(
 
     # Logging and directories
     versioned_dir, versioned_name, log_file_path, snapshots_dir = setup_training_logs_and_dirs(
-        base_name, config_filename, config, verbose, train_cfg.get("save_states", False),
-        train_cfg.get("log_training", True)
+        base_name,
+        str(cfg_path),
+        config,
+        verbose,
+        train_cfg.get("save_states", False),
+        train_cfg.get("log_training", True),
+        namespace=output_namespace,
+        relative_subdir=output_subdir,
+        fixed_run_id=fixed_run_id,
+        log_in_run_dir=log_in_run_dir,
     )
 
     flowpre_log(f"Using device: {device}", log_training=log_training,
                 filename_or_path=log_file_path, verbose=verbose)
     flowpre_log(f"🎲 Using seed: {seed}", log_training=log_training,
                 filename_or_path=log_file_path, verbose=verbose)
+    flowpre_log(
+        f"Monitoring policy: {monitoring_policy} | {monitoring_info['monitor_result_key']} role: "
+        f"{monitoring_info['monitor_role']}",
+        log_training=log_training,
+        filename_or_path=log_file_path,
+        verbose=verbose,
+    )
 
     base = StandardNormal([x_train.shape[1]])
-    z_test = torch.zeros(1, x_train.shape[1]).to(device)
+    if hasattr(base, "float"):
+        base = base.float()
+    if hasattr(base, "to"):
+        base = base.to(device)
+    z_test = x_train.new_zeros((1, x_train.shape[1]))
     flowpre_log(f"✅ Sanity check — log_prob at zero: {base.log_prob(z_test).item()}",
                 log_training=log_training, filename_or_path=log_file_path, verbose=verbose)
 
@@ -526,21 +541,21 @@ def train_flowpre_model(
 
         log_epoch_diagnostics(epoch, diagnostics_accum, log_file_path, verbose)
 
-        flowpre_log(f"📉 Epoch {epoch + 1}/{total_epochs} — Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}",
+        flowpre_log(f"📉 Epoch {epoch + 1}/{total_epochs} — Train Loss: {avg_train_loss:.4f} | {monitor_label} Loss: {val_loss:.4f}",
                     filename_or_path=log_file_path, verbose=verbose)
         flowpre_log(f"🔍 RRMSE (Train): mean={avg_rrmse_mean:.4f}, std={avg_rrmse_std:.4f}",
                     filename_or_path=log_file_path, verbose=verbose)
-        flowpre_log(f"🔍 RRMSE (Val):   mean={val_rrmse_mean:.4f}, std={val_rrmse_std:.4f}",
+        flowpre_log(f"🔍 RRMSE ({monitor_label}):   mean={val_rrmse_mean:.4f}, std={val_rrmse_std:.4f}",
                     filename_or_path=log_file_path, verbose=verbose)
 
         improvement = (best_val_loss - val_loss) / (abs(best_val_loss) + 1e-8) if best_val_loss < float(
             "inf") else float("inf")
-        flowpre_log(f"📈 Validation Improvement: {improvement:.4f}", filename_or_path=log_file_path, verbose=verbose)
+        flowpre_log(f"📈 {improvement_label}: {improvement:.4f}", filename_or_path=log_file_path, verbose=verbose)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             state_loss_epoch = epoch + 1
-            best_model_state = deepcopy(model.state_dict())
+            best_model_state = _state_dict_to_cpu(model.state_dict())
             best_metrics["train_rrmse_mean"] = avg_rrmse_mean
             best_metrics["train_rrmse_std"] = avg_rrmse_std
             best_metrics["val_rrmse_mean"] = val_rrmse_mean
@@ -551,7 +566,7 @@ def train_flowpre_model(
                 lr_decay_wait = 0
 
                 if train_cfg.get("save_states", False):
-                    snapshot_path = snapshots_dir / f"{versioned_name}_epoch{epoch + 1}_valloss{val_loss:.2f}.pt"
+                    snapshot_path = snapshots_dir / f"{versioned_name}_epoch{epoch + 1}_{loss_tag}{val_loss:.2f}.pt"
                     torch.save(best_model_state, snapshot_path)
                     flowpre_log(f"💾 Saved snapshot: {snapshot_path.name}", filename_or_path=log_file_path,
                                 verbose=verbose)
@@ -602,7 +617,7 @@ def train_flowpre_model(
                 flowpre_log(f"🛌 Early stopping at epoch {epoch + 1}", filename_or_path=log_file_path, verbose=verbose)
                 break
 
-    flowpre_log(f"✅ Best validation loss: {best_val_loss:.4f} (epoch {state_loss_epoch})",
+    flowpre_log(f"✅ {best_loss_label}: {best_val_loss:.4f} (epoch {state_loss_epoch})",
                 filename_or_path=log_file_path, verbose=verbose)
 
     if best_model_state is not None:
@@ -610,140 +625,126 @@ def train_flowpre_model(
 
     # Save final snapshot
     if train_cfg.get("save_states", False):
-        final_path = snapshots_dir / f"{versioned_name}_best_epoch{state_loss_epoch}_valloss{best_val_loss:.2f}.pt"
+        final_path = snapshots_dir / f"{versioned_name}_best_epoch{state_loss_epoch}_{loss_tag}{best_val_loss:.2f}.pt"
         torch.save(best_model_state, final_path)
 
-    # Final reconstruction metrics on both train and val sets
-    model.eval()
-    with torch.no_grad():
-        # --- Train ---
-        z_train, _ = model.forward(x_train, c_train)
-        x_recon_train = model.inverse(z_train, c_train)[0]
+    flowpre_log("🧱 Postprocess start: split_metrics_train", filename_or_path=log_file_path, verbose=verbose)
+    split_metrics_train = compute_flowpre_split_metrics(
+        model=model,
+        x=x_train,
+        c=c_train,
+        loss_kwargs=loss_kwargs,
+    )
+    flowpre_log("✅ Postprocess end: split_metrics_train", filename_or_path=log_file_path, verbose=verbose)
+    flowpre_log("🧱 Postprocess start: split_metrics_val", filename_or_path=log_file_path, verbose=verbose)
+    split_metrics_val = compute_flowpre_split_metrics(
+        model=model,
+        x=x_val,
+        c=c_val,
+        loss_kwargs=loss_kwargs,
+    )
+    flowpre_log("✅ Postprocess end: split_metrics_val", filename_or_path=log_file_path, verbose=verbose)
+    split_metrics_test = None
+    if allow_test_holdout and x_test is not None:
+        flowpre_log("🧱 Postprocess start: split_metrics_test", filename_or_path=log_file_path, verbose=verbose)
+        split_metrics_test = compute_flowpre_split_metrics(
+            model=model,
+            x=x_test,
+            c=c_test,
+            loss_kwargs=loss_kwargs,
+        )
+        flowpre_log("✅ Postprocess end: split_metrics_test", filename_or_path=log_file_path, verbose=verbose)
 
-        rrmse_train = torch.sqrt(torch.mean((x_recon_train - x_train) ** 2)) / torch.sqrt(torch.mean(x_train ** 2))
-        rrmse_train = rrmse_train.item()
+    flowpre_log(
+        f"📈 Train RRMSE: {split_metrics_train['rrmse_recon']:.4f}, R²: {split_metrics_train['r2_recon']:.4f}",
+        filename_or_path=log_file_path,
+        verbose=verbose,
+    )
+    flowpre_log(
+        f"📈 {monitor_label:<5} RRMSE: {split_metrics_val['rrmse_recon']:.4f}, R²: {split_metrics_val['r2_recon']:.4f}",
+        filename_or_path=log_file_path,
+        verbose=verbose,
+    )
 
-        ss_res_train = torch.sum((x_train - x_recon_train) ** 2)
-        ss_tot_train = torch.sum((x_train - x_train.mean(dim=0)) ** 2)
-        r2_train = (1 - ss_res_train / ss_tot_train).item()
-
-        # --- Val ---
-        z_val, _ = model.forward(x_val, c_val)
-        x_recon_val = model.inverse(z_val, c_val)[0]
-
-        rrmse_val = torch.sqrt(torch.mean((x_recon_val - x_val) ** 2)) / torch.sqrt(torch.mean(x_val ** 2))
-        rrmse_val = rrmse_val.item()
-
-        ss_res_val = torch.sum((x_val - x_recon_val) ** 2)
-        ss_tot_val = torch.sum((x_val - x_val.mean(dim=0)) ** 2)
-        r2_val = (1 - ss_res_val / ss_tot_val).item()
-
-    flowpre_log(f"📈 Train RRMSE: {rrmse_train:.4f}, R²: {r2_train:.4f}", filename_or_path=log_file_path,
-                verbose=verbose)
-    flowpre_log(f"📈 Val   RRMSE: {rrmse_val:.4f}, R²: {r2_val:.4f}", filename_or_path=log_file_path, verbose=verbose)
-
+    flowpre_log("🧱 Postprocess start: influence", filename_or_path=log_file_path, verbose=verbose)
     influence_dict = compute_latent_feature_influence(
         model, x_train, c_train, feature_names,
         influence_step_fraction=interp_cfg.get("influence_step_fraction", 0.01),
         sweep_range=tuple(interp_cfg.get("sweep_range", [-model_cfg["tail_bound"], model_cfg["tail_bound"]]))
     )
-
-    # --- Per-class isotropy RRMSE from the loss (using full Train/Val tensors) ---
-    train_iso_per_class = _iso_rrmse_per_class_from_loss(model, x_train, c_train, loss_kwargs)
-    val_iso_per_class = _iso_rrmse_per_class_from_loss(model, x_val, c_val, loss_kwargs)
-    test_iso_per_class = _iso_rrmse_per_class_from_loss(model, x_test, c_test,
-                                                        loss_kwargs) if x_test is not None else {}
-
-    # --- Whole-set isotropy diagnostics (moments, Mahalanobis, eigvals) ---
-    train_iso_whole = _latent_isotropy_stats(model, x_train, c_train)
-    val_iso_whole = _latent_isotropy_stats(model, x_val, c_val)
-    test_iso_whole = _latent_isotropy_stats(model, x_test, c_test) if x_test is not None else {}
-
-    # --- Per-class extended isotropy diagnostics ---
-    train_iso_per_class_ext = _latent_isotropy_stats_per_class(model, x_train, c_train)
-    val_iso_per_class_ext = _latent_isotropy_stats_per_class(model, x_val, c_val)
-    test_iso_per_class_ext = _latent_isotropy_stats_per_class(model, x_test, c_test) if x_test is not None else {}
+    flowpre_log("✅ Postprocess end: influence", filename_or_path=log_file_path, verbose=verbose)
 
     # Optional compact log
     flowpre_log(
-        f"📊 Per-class isotropy (Train): {_format_iso_dict(train_iso_per_class)}",
+        f"📊 Per-class isotropy (Train): {_format_iso_dict(split_metrics_train['per_class_iso_rrmse'])}",
         filename_or_path=log_file_path, verbose=verbose
     )
     flowpre_log(
-        f"📊 Per-class isotropy (Val):   {_format_iso_dict(val_iso_per_class)}",
+        f"📊 Per-class isotropy ({monitor_label}):   {_format_iso_dict(split_metrics_val['per_class_iso_rrmse'])}",
         filename_or_path=log_file_path, verbose=verbose
     )
 
-    # --- Overall isotropy on TRAIN/VAL/TEST from the loss (mean→0, std→1) ---
-    train_rrmse_mean_whole, train_rrmse_std_whole = None, None
-    val_rrmse_mean_whole, val_rrmse_std_whole = None, None
-    test_rrmse_mean_whole, test_rrmse_std_whole = None, None
-
-    model.eval()
-    with torch.no_grad():
-        # overall isotropy on TRAIN
-        _, _, (train_rrmse_mean_whole, train_rrmse_std_whole) = flexible_flow_loss_from_model(
-            model, x_train, c_train, **loss_kwargs
-        )
-        # overall isotropy on VAL
-        _, _, (val_rrmse_mean_whole, val_rrmse_std_whole) = flexible_flow_loss_from_model(
-            model, x_val, c_val, **loss_kwargs
-        )
-        # overall isotropy on TEST (if provided)
-        if x_test is not None:
-            _, _, (test_rrmse_mean_whole, test_rrmse_std_whole) = flexible_flow_loss_from_model(
-                model, x_test, c_test, **loss_kwargs
-            )
-
-    # cast to plain floats
-    train_rrmse_mean_whole = float(train_rrmse_mean_whole)
-    train_rrmse_std_whole = float(train_rrmse_std_whole)
-    val_rrmse_mean_whole = float(val_rrmse_mean_whole)
-    val_rrmse_std_whole = float(val_rrmse_std_whole)
-    if x_test is not None:
-        test_rrmse_mean_whole = float(test_rrmse_mean_whole)
-        test_rrmse_std_whole = float(test_rrmse_std_whole)
+    metrics_long_path = None
+    results_path = None
 
     # --- Save results with overall isotropy (not per-epoch best_metrics) ---
     if train_cfg.get("save_results", False):
+        flowpre_log("🧱 Postprocess start: save_results", filename_or_path=log_file_path, verbose=verbose)
         results = {
             "best_epoch": state_loss_epoch,
             "total_epochs": epoch + 1,
             "seed": seed,
-            "train": {
-                "rrmse_mean_whole": round(train_rrmse_mean_whole, 6),
-                "rrmse_std_whole": round(train_rrmse_std_whole, 6),
-
-                "per_class_iso_rrmse": train_iso_per_class,
-                "isotropy_stats": train_iso_whole,
-                "isotropy_stats_per_class": train_iso_per_class_ext,
-            },
-            "val": {
-                "rrmse_mean_whole": round(val_rrmse_mean_whole, 6),
-                "rrmse_std_whole": round(val_rrmse_std_whole, 6),
-
-                "per_class_iso_rrmse": val_iso_per_class,
-                "isotropy_stats": val_iso_whole,
-                "isotropy_stats_per_class": val_iso_per_class_ext,
-            }
+            "train": split_metrics_train,
+            "val": split_metrics_val,
         }
+        if monitoring_artifact is not None:
+            results["monitoring"] = monitoring_artifact
 
-        if x_test is not None:
-            results["test"] = {
-                "rrmse_mean_whole": round(test_rrmse_mean_whole, 6) if test_rrmse_mean_whole is not None else None,
-                "rrmse_std_whole": round(test_rrmse_std_whole, 6) if test_rrmse_std_whole is not None else None,
-                "per_class_iso_rrmse": test_iso_per_class,
-                "isotropy_stats": test_iso_whole,
-                "isotropy_stats_per_class": test_iso_per_class_ext,
-            }
+        if split_metrics_test is not None:
+            results["test"] = split_metrics_test
 
         results_path = versioned_dir / f"{versioned_name}_results.yaml"
         with open(results_path, "w") as f:
             yaml.dump(results, f, sort_keys=False)
         flowpre_log(f"📝 Saved enriched results to: {results_path}", filename_or_path=log_file_path, verbose=verbose)
 
+        run_context = build_run_context(
+            model_family="flowpre",
+            run_id=versioned_name,
+            seed=seed,
+            config=config,
+            config_path=cfg_path,
+            dataset_name=str(eval_ctx.get("dataset_name", DEFAULT_OFFICIAL_DATASET_NAME)),
+            dataset_manifest_path=eval_ctx.get("dataset_manifest_path", official_raw_bundle_manifest_path()),
+            split_id=str(eval_ctx.get("split_id", "init_temporal_processed_v1")),
+            split_manifest_path=eval_ctx.get("split_manifest_path"),
+            upstream_variant_fingerprint=eval_ctx.get("upstream_variant_fingerprint"),
+            contract_id=eval_ctx.get("contract_id"),
+            comparison_group_id=eval_ctx.get("comparison_group_id"),
+            seed_set_id=eval_ctx.get("seed_set_id"),
+            base_config_id=eval_ctx.get("base_config_id"),
+            objective_metric_id=eval_ctx.get("objective_metric_id"),
+            dataset_level_axes=eval_ctx.get("dataset_level_axes"),
+            run_level_axes=eval_ctx.get("run_level_axes"),
+            split_role_map=eval_ctx.get("split_role_map"),
+            monitoring=monitoring_artifact,
+            test_enabled=bool(split_metrics_test is not None),
+        )
+        _, metrics_long_path = save_canonical_run_artifacts(
+            results=results,
+            context=run_context,
+            out_dir=versioned_dir,
+            stem=versioned_name,
+        )
+        flowpre_log(
+            f"🧾 Saved canonical metrics table to: {metrics_long_path}",
+            filename_or_path=log_file_path,
+            verbose=verbose,
+        )
+        flowpre_log("✅ Postprocess end: save_results", filename_or_path=log_file_path, verbose=verbose)
+
     # Always save the config
-    shutil.copy(ROOT_PATH / "config" / config_filename, versioned_dir / f"{versioned_name}.yaml")
+    shutil.copy(cfg_path, versioned_dir / f"{versioned_name}.yaml")
 
     # Save model only if enabled
     if train_cfg.get("save_model", False):
@@ -759,6 +760,28 @@ def train_flowpre_model(
 
     flowpre_log(f"✅ Config saved under {versioned_dir}", filename_or_path=log_file_path, verbose=verbose)
 
+    model.run_artifacts = {
+        "run_id": versioned_name,
+        "run_dir": str(versioned_dir),
+        "config_path": str(cfg_path),
+        "saved_config_path": str(versioned_dir / f"{versioned_name}.yaml"),
+        "results_path": None if results_path is None else str(results_path),
+        "metrics_long_path": None if metrics_long_path is None else str(metrics_long_path),
+        "model_path": str(versioned_dir / f"{versioned_name}.pt") if train_cfg.get("save_model", False) else None,
+        "log_file_path": None if log_file_path is None else str(log_file_path),
+        "output_namespace": output_namespace,
+        "output_subdir": output_subdir,
+        "fixed_run_id": fixed_run_id,
+        "monitoring_policy": monitoring_policy,
+    }
+
+    del optimizer, dataset, dataloader, base, best_model_state
+    del split_metrics_train, split_metrics_val
+    if split_metrics_test is not None:
+        del split_metrics_test
+    del influence_dict
+    _release_training_memory()
+
     return model
 
 
@@ -767,9 +790,16 @@ def train_flowpre_pipeline(
     cols_to_exclude: list[str] = None,
     config_filename: str = "flow_pre.yaml",
     base_name: str = "flow_pre",
-    device: str = "cuda",
+    device: str = "auto",
     seed: int | None = None,
-    verbose: bool = True
+    verbose: bool = True,
+    allow_test_holdout: bool = False,
+    evaluation_context: Optional[dict] = None,
+    output_namespace: str | None = None,
+    output_subdir: str | None = None,
+    fixed_run_id: str | None = None,
+    log_in_run_dir: bool = False,
+    monitoring_policy: str = OFFICIAL_VAL_POLICY,
 ):
     """
     Complete pipeline to load, filter and train a FlowPre model using default splits.
@@ -786,6 +816,8 @@ def train_flowpre_pipeline(
     """
     if cols_to_exclude is None:
         cols_to_exclude = ["post_cleaning_index"]
+    monitoring_policy = normalize_monitoring_policy(monitoring_policy)
+    ensure_holdout_policy(monitoring_policy, allow_test_holdout=allow_test_holdout)
 
     # Step 1: Load train/val/test splits   <-- CHANGE (was only train/val)
     X_train, X_val, X_test, *_ = load_or_create_raw_splits(
@@ -795,20 +827,35 @@ def train_flowpre_pipeline(
 
     # Step 2: Filter and align columns
     X_train_filtered = filter_flowpre_columns(X_train, cols_to_exclude, condition_col)
-    X_val_filtered = filter_flowpre_columns(X_val, cols_to_exclude, condition_col)
-    X_test_filtered = filter_flowpre_columns(X_test, cols_to_exclude, condition_col)
+    X_val_filtered = (
+        X_train_filtered.copy()
+        if monitoring_policy == TRAIN_ONLY_POLICY
+        else filter_flowpre_columns(X_val, cols_to_exclude, condition_col)
+    )
+    X_test_filtered = (
+        filter_flowpre_columns(X_test, cols_to_exclude, condition_col)
+        if allow_test_holdout
+        else None
+    )
 
     # Step 3: Train the model
     model = train_flowpre_model(
         X_train=X_train_filtered,
         X_val=X_val_filtered,
         X_test=X_test_filtered,
+        allow_test_holdout=allow_test_holdout,
         condition_col=condition_col,
         config_filename=config_filename,
         base_name=base_name,
         device=device,
         seed=seed,
-        verbose=verbose
+        verbose=verbose,
+        evaluation_context=evaluation_context,
+        output_namespace=output_namespace,
+        output_subdir=output_subdir,
+        fixed_run_id=fixed_run_id,
+        log_in_run_dir=log_in_run_dir,
+        monitoring_policy=monitoring_policy,
     )
 
     return model
@@ -851,7 +898,7 @@ def transform_to_latent_with_flowpre(
     X_train: Optional[pd.DataFrame] = None,
     X_val: Optional[pd.DataFrame] = None,
     X_test: Optional[pd.DataFrame] = None,
-    device: str = "cuda",
+    device: str = "auto",
     verbose: bool = True
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -869,7 +916,14 @@ def transform_to_latent_with_flowpre(
     """
     assert re.match(r".+_v\d+$", model_name), f"❌ model_name '{model_name}' must end with '_vX'"
 
-    model_dir = ROOT_PATH / "outputs" / "models" / "flow_pre" / model_name
+    model_candidates = [
+        ROOT_PATH / "outputs" / "models" / "official" / "flow_pre" / model_name,
+        ROOT_PATH / "outputs" / "models" / "flow_pre" / model_name,
+    ]
+    model_dir = next((candidate for candidate in model_candidates if candidate.exists()), None)
+    if model_dir is None:
+        raise FileNotFoundError(f"❌ Model folder not found for: {model_name}")
+
     model_path = model_dir / f"{model_name}.pt"
     config_path = model_dir / f"{model_name}.yaml"
 
@@ -881,7 +935,7 @@ def transform_to_latent_with_flowpre(
 
     config = load_yaml_config(config_path)
     model_cfg = config["model"]
-    device = torch.device("cuda" if device.lower() == "cuda" and torch.cuda.is_available() else "cpu")
+    device = select_training_device(device)
 
     # Load splits if not provided
     if X_train is None or X_val is None or X_test is None:

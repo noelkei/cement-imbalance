@@ -1,0 +1,62 @@
+contract:
+  closure_contract_id: "closure_contract_v1"
+  mlp_base_config_id: "mlp_closure_base_v1"
+  seed_set_id: "closure_5x_v1"
+  objective_metric_id: "raw_real.macro.rrmse"
+  allow_test_holdout_default: false
+
+model:
+  embedding_dim: 12
+  hidden_dim: 128
+  num_layers: 3
+  activation: "relu"
+  dropout: 0.0
+  batchnorm: false
+  use_weight_norm: true
+  residual: true
+  final_activation: null
+  task: "regression"
+  context_mode: "embed"
+  target_names: ["init"]
+
+training:
+  optimizer: "adam"
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+  batch_size: 256
+  learning_rate: 0.0001
+  num_epochs: 200
+
+  early_stopping_patience: 20
+  early_stop_min_delta: 0.0
+
+  lr_scheduler: "plateau"
+  lr_decay_factor: 0.5
+  lr_decay_patience: 10
+  plateau_threshold: 1.0e-4
+  plateau_threshold_mode: "rel"
+  lr_cooldown: 0
+  min_lr: 0.0
+
+  save_states: false
+  log_training: false
+  save_results: true
+  save_model: false
+
+  loss_reduction: "per_class_equal"
+  regression_group_metric: "rrmse"
+
+  dataloader_mode: "baseline"
+  cycle_reals: true
+  allow_synth: true
+
+interpretability:
+  compute_shap: false
+  shap_num_background: 128
+  shap_num_samples: 256
+  shap_kernel_nsamples: 200
+  save_influence: false
+  influence_step_fraction: 0.005
+  sweep_range: [-3.0, 3.0]

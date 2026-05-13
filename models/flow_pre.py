@@ -16,6 +16,10 @@ from nflows.transforms.coupling import (
 from nflows.transforms.lu import LULinear
 from nflows.transforms.normalization import ActNorm
 
+
+FLOW_DTYPE = torch.float32
+
+
 # ───────────────────────────────
 # Create MLP with weight norm
 # ───────────────────────────────
@@ -29,10 +33,12 @@ def create_mlp(in_features, out_features, hidden_features, num_layers):
     return nn.Sequential(*layers)
 
 class ContextMLP(nn.Module):
-    def __init__(self, in_features, context_dim, out_features, hidden_features, num_layers, device="cpu"):
+    def __init__(self, in_features, context_dim, out_features, hidden_features, num_layers, device=None):
         super().__init__()
         self.net = create_mlp(in_features + context_dim, out_features, hidden_features, num_layers)
-        self.to(device)
+        self.float()
+        if device is not None:
+            self.to(device=device, dtype=FLOW_DTYPE)
 
     def forward(self, x, context):
         x_context = torch.cat([x, context], dim=1)
@@ -62,9 +68,9 @@ class FlowPre(nn.Module):
     ):
         super().__init__()
         self.input_dim = input_dim
-        self.device = device
+        self.device = torch.device(device)
         self.embedding_dim = embedding_dim
-        self.context_embedding = nn.Embedding(num_classes, embedding_dim).to(device)
+        self.context_embedding = nn.Embedding(num_classes, embedding_dim)
 
         def add_permutation():
             return LULinear(input_dim) if use_learnable_permutations else RandomPermutation(input_dim)
@@ -73,22 +79,23 @@ class FlowPre(nn.Module):
             return AffineCouplingTransform(
                 mask=mask,
                 transform_net_create_fn=lambda in_f, out_f: ContextMLP(
-                    in_f, embedding_dim, out_f, hidden_features, num_layers, device)
+                    in_f, embedding_dim, out_f, hidden_features, num_layers)
             )
 
         def build_rq(mask):
             return PiecewiseRationalQuadraticCouplingTransform(
                 mask=mask,
                 transform_net_create_fn=lambda in_f, out_f: ContextMLP(
-                    in_f, embedding_dim, out_f, hidden_features, num_layers, device),
+                    in_f, embedding_dim, out_f, hidden_features, num_layers),
                 num_bins=num_bins,
                 tails="linear",
                 tail_bound=tail_bound
             )
 
+        mask_base = torch.arange(input_dim, dtype=torch.int64)
         masks = [
-            (torch.arange(input_dim) % 2).to(device),
-            ((torch.arange(input_dim) + 1) % 2).to(device)
+            (mask_base % 2).to(dtype=FLOW_DTYPE),
+            ((mask_base + 1) % 2).to(dtype=FLOW_DTYPE),
         ]
 
         transforms = []
@@ -121,29 +128,32 @@ class FlowPre(nn.Module):
         self.flow = Flow(
             transform=CompositeTransform(transforms),
             distribution=StandardNormal(shape=[input_dim])
-        ).to(device)
+        )
+        self.float()
+        self.to(device=self.device)
 
     def get_context(self, class_labels):
-        return self.context_embedding(class_labels.to(self.device))
+        return self.context_embedding(torch.as_tensor(class_labels, dtype=torch.long, device=self.device))
 
     def forward(self, x, class_labels):
         context = self.get_context(class_labels)
-        return self.flow._transform.forward(x.to(self.device), context)
+        return self.flow._transform.forward(x.to(device=self.device, dtype=FLOW_DTYPE), context)
 
     def inverse(self, z, class_labels):
         context = self.get_context(class_labels)
-        return self.flow._transform.inverse(z.to(self.device), context)
+        return self.flow._transform.inverse(z.to(device=self.device, dtype=FLOW_DTYPE), context)
 
     def log_prob(self, x, class_labels):
         context = self.get_context(class_labels)
-        return self.flow.log_prob(inputs=x.to(self.device), context=context)
+        return self.flow.log_prob(inputs=x.to(device=self.device, dtype=FLOW_DTYPE), context=context)
 
     def sample(self, num_samples, class_labels):
         context = self.get_context(class_labels)
         return self.flow.sample(num_samples, context=context)
 
     def to_device(self, device):
-        self.device = device
-        self.flow.to(device)
-        self.context_embedding.to(device)
+        self.device = torch.device(device)
+        self.float()
+        self.to(device=self.device)
+        return self
 

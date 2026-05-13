@@ -1,26 +1,36 @@
 import pandas as pd
 import numpy as np
-from data.utils import log
+import joblib
+import json
+from pathlib import Path
+from data.utils import ROOT_PATH, dump_json, log, path_relative_to_root
 import time
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d, grey_closing
 import matplotlib.pyplot as plt
 import math
-from training.utils import ROOT_PATH
 from data.preprocess import (
     clean_cement_dataframe,
-    apply_cleaning_pipeline,
+    apply_deterministic_preprocessing,
     filter_by_type_and_summarize,
     ilr_transform_groups,
     normalize_groups
 )
-from data.utils import load_column_mapping_by_group
+from data.utils import load_column_mapping_by_group, load_cleaning_contract
 from tqdm import tqdm
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import silhouette_score
 from sklearn.tree import DecisionTreeRegressor
 import threading
 import traceback
+
+
+OFFICIAL_CLEANED_ROOT = ROOT_PATH / "data" / "cleaned" / "official"
+DEFAULT_LEGACY_CLEANING_POLICY_ID = "or_drop_holdout_v1"
+DEFAULT_OFFICIAL_CLEANING_POLICY_ID = "trainfit_overlap_cap1pct_holdoutflag_v1"
+DEFAULT_TRAIN_DROP_CAP_FRACTION = 0.01
+DEFAULT_UNIVARIATE_N_BINS = 200
+DEFAULT_IFOREST_CONTAMINATIONS = np.linspace(0.0005, 0.01, 20).round(6).tolist()
 
 
 def load_processed_data(filename: str = "df_processed.csv", verbose: bool = True, force = False) -> pd.DataFrame:
@@ -44,19 +54,51 @@ def load_processed_data(filename: str = "df_processed.csv", verbose: bool = True
 
     log("🔄 Processed data not found. Running full preprocessing pipeline...", verbose)
 
+    cleaning_contract, contract_path = load_cleaning_contract(verbose=verbose)
+    source_cfg = cleaning_contract["source"]
+    type_col = str(source_cfg["columns"]["type"])
+    process_col = str(source_cfg["columns"]["process"])
+    allowed_types = [str(value) for value in source_cfg["filters"]["allowed_types"]]
+    allowed_processes = [str(value).lower() for value in source_cfg["filters"]["allowed_processes"]]
+    cols_to_remove = [str(value) for value in source_cfg["remove_columns_after_mapping"]]
+
+    log(
+        f"🧩 Using cleaning contract: {path_relative_to_root(contract_path)}",
+        verbose,
+    )
+
     # Step 1: Load raw CSV
     raw_path = ROOT_PATH / "data" / "raw"
-    raw_file = raw_path / "bd_CALIDAD_CALUCEM_KM_MB(all_data_for_modeling)_13_07_2025.csv"
-    df_raw_full = pd.read_csv(raw_file, sep=";", engine="python")
+    raw_file = raw_path / str(source_cfg["raw_filename"])
+    if not raw_file.exists():
+        raise FileNotFoundError(
+            f"Configured raw dataset not found: {path_relative_to_root(raw_file)} "
+            f"(contract: {path_relative_to_root(contract_path)})"
+        )
+
+    df_raw_full = pd.read_csv(raw_file, **source_cfg["read_csv"])
+
+    missing_raw_columns = [col for col in [type_col, process_col] if col not in df_raw_full.columns]
+    if missing_raw_columns:
+        raise ValueError(
+            "Raw dataset is missing configured columns "
+            f"{missing_raw_columns} required by cleaning contract "
+            f"{path_relative_to_root(contract_path)}"
+        )
 
     # Step 2: Filter top types and accepted processes immediately
-    top_types = ["ISTRA 40", "ISTRA 50", "Lumnite SG"]
-    valid_processes = ["otprema", "meljava"]
-
     df_raw = df_raw_full[
-        df_raw_full["Type"].isin(top_types) &
-        df_raw_full["Process"].str.lower().isin(valid_processes)
+        df_raw_full[type_col].astype(str).isin(allowed_types) &
+        df_raw_full[process_col].astype(str).str.lower().isin(allowed_processes)
         ].copy()
+
+    if df_raw.empty:
+        raise ValueError(
+            "Configured type/process filters produced zero rows in load_processed_data(). "
+            f"Contract={path_relative_to_root(contract_path)}, raw_file={path_relative_to_root(raw_file)}. "
+            "This usually means the active cleaning contract does not match the local raw dataset "
+            "or the private overlay is missing."
+        )
 
     shape_raw = df_raw.shape
     cols_raw = set(df_raw.columns)
@@ -64,7 +106,6 @@ def load_processed_data(filename: str = "df_processed.csv", verbose: bool = True
     print(shape_raw)
 
     # Step 3: Clean raw data
-    cols_to_remove = ["customer", "mill", "fe2o3uk"]
     df_clean = clean_cement_dataframe(df_raw, verbose=verbose, col_threshold=0.9, remove_cols=cols_to_remove)
 
     # Step 4: Load encrypted column groups
@@ -84,7 +125,7 @@ def load_processed_data(filename: str = "df_processed.csv", verbose: bool = True
     exclude_cols = ["a", "b"]
 
     # Step 5: Run cleaning pipeline
-    df_pre_outliers = apply_cleaning_pipeline(
+    df_pre_outliers = apply_deterministic_preprocessing(
         df_clean,
         ranges=ranges,
         drop_invalid=True,
@@ -94,7 +135,7 @@ def load_processed_data(filename: str = "df_processed.csv", verbose: bool = True
     )
 
     # Step 6: Filter by type again for summary logging
-    df_filtered = filter_by_type_and_summarize(df_pre_outliers, top_types, verbose=verbose)
+    df_filtered = filter_by_type_and_summarize(df_pre_outliers, allowed_types, verbose=verbose)
 
     # Step 7: ILR + normalization
     groups = {
@@ -126,7 +167,7 @@ def load_processed_data(filename: str = "df_processed.csv", verbose: bool = True
     log(f"• Columns added   ({len(added_cols)}): {added_cols}", verbose)
 
     # Per-type breakdown
-    original_counts = df_raw["Type"].value_counts()
+    original_counts = df_raw[type_col].astype(str).value_counts()
     final_counts = df_normalized["type"].value_counts()
     log("\n📎 Per-type row retention:", verbose)
     for t in final_counts.index:
@@ -136,6 +177,676 @@ def load_processed_data(filename: str = "df_processed.csv", verbose: bool = True
         log(f"  → {t}: {original} → {final} ({pct:.2f}% removed)", verbose)
 
     return df_normalized
+
+
+def _legacy_cleaning_dir(split_id: str) -> Path:
+    return OFFICIAL_CLEANED_ROOT / split_id
+
+
+def _official_cleaning_dir(
+    split_id: str,
+    cleaning_policy_id: str = DEFAULT_OFFICIAL_CLEANING_POLICY_ID,
+) -> Path:
+    base_dir = OFFICIAL_CLEANED_ROOT / split_id
+    if cleaning_policy_id == DEFAULT_LEGACY_CLEANING_POLICY_ID:
+        legacy_dir = _legacy_cleaning_dir(split_id)
+        if (legacy_dir / "manifest.json").exists():
+            return legacy_dir
+    return base_dir / cleaning_policy_id
+
+
+def _cleaning_policy_status(cleaning_policy_id: str) -> str:
+    return "legacy_policy" if cleaning_policy_id == DEFAULT_LEGACY_CLEANING_POLICY_ID else "canonical"
+
+
+def _counts_by_class(series: pd.Series) -> dict[str, int]:
+    counts = series.astype(str).value_counts().sort_index()
+    return {str(key): int(val) for key, val in counts.items()}
+
+
+def _train_drop_warnings_by_class(
+    split_df: pd.DataFrame,
+    drop_mask: pd.Series,
+    *,
+    type_col: str = "type",
+) -> tuple[dict[str, dict[str, float | int]], list[str]]:
+    total_rows = int(len(split_df))
+    global_drop_fraction = float(drop_mask.mean()) if total_rows else 0.0
+    warnings: list[str] = []
+    summary: dict[str, dict[str, float | int]] = {}
+
+    for class_value, class_df in split_df.groupby(type_col, sort=False):
+        class_mask = drop_mask.loc[class_df.index]
+        class_rows = int(len(class_df))
+        drop_rows = int(class_mask.sum())
+        drop_fraction = float(drop_rows / class_rows) if class_rows else 0.0
+        warning = False
+
+        if class_rows > 0 and drop_rows > 0:
+            if global_drop_fraction == 0.0:
+                warning = True
+            else:
+                relative_ratio = drop_fraction / global_drop_fraction if global_drop_fraction > 0 else float("inf")
+                warning = drop_fraction > (global_drop_fraction + 0.005) and relative_ratio > 2.0
+
+        summary[str(class_value)] = {
+            "n_rows": class_rows,
+            "drop_rows": drop_rows,
+            "drop_fraction": round(drop_fraction, 6),
+            "warning": bool(warning),
+        }
+        if warning:
+            warnings.append(
+                f"class={class_value}: drop_fraction={drop_fraction:.4f} vs global={global_drop_fraction:.4f}"
+            )
+
+    return summary, warnings
+
+
+def prepare_statistical_cleaning_frame(
+    df: pd.DataFrame,
+    target: str = "init",
+) -> pd.DataFrame:
+    """
+    Prepare the processed source frame for learned cleaning without changing the
+    model-facing feature surface later built in `data.sets`.
+    """
+    df_out = df.copy()
+    if target == "init":
+        df_out = df_out.drop(columns=["end", "6h"], errors="ignore")
+    return df_out
+
+
+def build_statistical_cleaning_spec(
+    df: pd.DataFrame,
+    target: str = "init",
+    verbose: bool = False,
+) -> dict:
+    _, grouped_mapping = load_column_mapping_by_group(verbose=verbose)
+
+    groups = {
+        "chem": list(grouped_mapping.get("chem", {}).values()),
+        "phase": list(grouped_mapping.get("phase", {}).values()),
+    }
+    ratio_cols = list(grouped_mapping.get("chem_ratios", {}).values()) + list(
+        grouped_mapping.get("phase_ratios", {}).values()
+    )
+
+    compositional_cols = [col for cols in groups.values() for col in cols]
+    phase_cols = [col for col in df.columns if col.startswith("ilr_phase")]
+    visually_considered_unnecessary = ["blaine", "blaines", "water"]
+    provenance_cols = ["split", "split_row_id", "source_row_number"]
+
+    excluded_cols = set(
+        compositional_cols
+        + ratio_cols
+        + ["date", "type", "process"]
+        + provenance_cols
+        + visually_considered_unnecessary
+        + [target]
+    )
+    filter_cols = [
+        col
+        for col in df.columns
+        if not (
+            col.startswith("ilr_phase")
+            or col.startswith("norm_")
+            or "sum" in col
+            or col in excluded_cols
+        )
+    ]
+    all_filter_cols = filter_cols + phase_cols
+    n_total = len(all_filter_cols)
+    if n_total == 0:
+        raise ValueError("No statistical cleaning columns were selected from the processed source.")
+
+    alpha = (1 - 0.95) / n_total
+    thresholds = np.linspace(1 - alpha, 1, 5).tolist()
+    return {
+        "groups": groups,
+        "ratio_cols": ratio_cols,
+        "filter_cols": filter_cols,
+        "phase_cols": phase_cols,
+        "all_filter_cols": all_filter_cols,
+        "thresholds": thresholds,
+        "only_threshold": float(min(thresholds)),
+        "n_bins": DEFAULT_UNIVARIATE_N_BINS,
+        "contamination_values": DEFAULT_IFOREST_CONTAMINATIONS,
+    }
+
+
+def _call_with_numpy_seed(random_state: int | None, func, *args, **kwargs):
+    if random_state is None:
+        return func(*args, **kwargs)
+
+    previous_state = np.random.get_state()
+    try:
+        np.random.seed(random_state)
+        return func(*args, **kwargs)
+    finally:
+        np.random.set_state(previous_state)
+
+
+def fit_univariate_density_rules(
+    train_df: pd.DataFrame,
+    filter_columns: list[str],
+    phase_columns: list[str] | None = None,
+    thresholds: list[float] | None = None,
+    n_bins: int = DEFAULT_UNIVARIATE_N_BINS,
+    only_threshold: float = 0.99,
+    type_col: str = "type",
+    random_state: int | None = 42,
+    verbose: bool = False,
+) -> dict:
+    phase_columns = phase_columns or []
+    columns_to_check = [col for col in filter_columns + phase_columns if col in train_df.columns]
+    df_by_type = {
+        str(t): train_df[train_df[type_col] == t].copy()
+        for t in train_df[type_col].dropna().unique().tolist()
+    }
+
+    fitted = _call_with_numpy_seed(
+        random_state,
+        clean_univariate_bootstrap_density_weighted,
+        dataframes_dict=df_by_type,
+        filter_columns=filter_columns,
+        phase_columns=phase_columns,
+        thresholds=thresholds,
+        n_bins=n_bins,
+        dtype="float64",
+        verbose=verbose,
+        bootstrap="auto",
+        n_bootstrap="auto",
+        only_threshold=only_threshold,
+        pect_prominence=0.05,
+        weight=None,
+        filtering=False,
+    )
+
+    rules: dict[str, dict] = {
+        "type_col": type_col,
+        "n_bins": int(n_bins),
+        "only_threshold": float(only_threshold),
+        "columns_to_check": columns_to_check,
+        "per_type": {},
+    }
+
+    for type_value, df_marked in fitted.items():
+        type_rules: dict[str, dict] = {}
+        for col in columns_to_check:
+            cluster_col = f"{col}_cluster"
+            if cluster_col not in df_marked.columns:
+                continue
+
+            values = pd.to_numeric(df_marked[col], errors="coerce").to_numpy(dtype=float)
+            keep_mask = (pd.to_numeric(df_marked[cluster_col], errors="coerce").fillna(-1) != -1).to_numpy()
+            finite_mask = np.isfinite(values)
+            values = values[finite_mask]
+            keep_mask = keep_mask[finite_mask]
+            if values.size == 0:
+                continue
+
+            if np.nanmin(values) == np.nanmax(values):
+                bin_edges = np.array([values.min() - 0.5, values.max() + 0.5], dtype=float)
+            else:
+                bin_edges = np.histogram_bin_edges(values, bins=n_bins)
+
+            bin_indices = np.digitize(values, bin_edges[1:-1], right=False)
+            bin_count = len(bin_edges) - 1
+            counts = np.bincount(bin_indices, minlength=bin_count)
+            kept_counts = np.bincount(bin_indices[keep_mask], minlength=bin_count)
+            keep_bins = ((counts > 0) & (kept_counts > 0)).astype(int)
+
+            type_rules[col] = {
+                "bin_edges": bin_edges.astype(float).tolist(),
+                "keep_bins": keep_bins.astype(int).tolist(),
+                "train_rows": int(values.size),
+                "train_kept_rows": int(keep_mask.sum()),
+            }
+
+        rules["per_type"][str(type_value)] = type_rules
+    return rules
+
+
+def apply_univariate_density_rules(
+    df: pd.DataFrame,
+    rules: dict,
+    type_col: str = "type",
+) -> pd.Series:
+    keep_series = pd.Series(True, index=df.index, dtype=bool)
+    type_rules = rules.get("per_type", {})
+
+    for type_value, df_type in df.groupby(type_col, sort=False):
+        current_rules = type_rules.get(str(type_value), {})
+        if not current_rules:
+            continue
+
+        type_keep = np.ones(len(df_type), dtype=bool)
+        for col, rule in current_rules.items():
+            if col not in df_type.columns:
+                continue
+
+            values = pd.to_numeric(df_type[col], errors="coerce").to_numpy(dtype=float)
+            bin_edges = np.asarray(rule["bin_edges"], dtype=float)
+            keep_bins = np.asarray(rule["keep_bins"], dtype=bool)
+            bin_indices = np.digitize(values, bin_edges[1:-1], right=False)
+            valid = (
+                np.isfinite(values)
+                & (values >= bin_edges[0])
+                & (values <= bin_edges[-1])
+                & (bin_indices >= 0)
+                & (bin_indices < len(keep_bins))
+            )
+            col_keep = np.zeros(len(df_type), dtype=bool)
+            col_keep[valid] = keep_bins[bin_indices[valid]]
+            type_keep &= col_keep
+
+        keep_series.loc[df_type.index] = type_keep
+    return keep_series
+
+
+def _select_iforest_model_for_frame(
+    df: pd.DataFrame,
+    columns_to_check: list[str],
+    contamination_values: list[float] | None = None,
+    random_state: int = 42,
+    verbose: bool = False,
+) -> tuple[IsolationForest | None, dict]:
+    contamination_values = contamination_values or DEFAULT_IFOREST_CONTAMINATIONS
+    X = df[columns_to_check].dropna().astype(np.float64)
+    if X.empty or len(X) < 10:
+        return None, {"status": "skipped_not_enough_rows", "n_rows": int(len(X))}
+
+    best_score = None
+    best_model = None
+    best_preds = None
+    best_contamination = None
+
+    for contamination in contamination_values:
+        model = ProgressIsolationForest(
+            contamination=contamination,
+            n_estimators=50,
+            max_samples=min(len(X), 5000),
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        model.fit(X)
+        preds = model.predict(X)
+        if len(np.unique(preds)) < 2:
+            continue
+
+        try:
+            score = silhouette_score(
+                X,
+                preds,
+                sample_size=min(10000, X.shape[0]),
+                random_state=random_state,
+            )
+        except Exception:
+            continue
+
+        if verbose:
+            print(f"[IForest] contamination={contamination:.6f} silhouette={score:.6f}")
+
+        if best_score is None or score > best_score:
+            best_score = float(score)
+            best_model = model
+            best_preds = preds
+            best_contamination = float(contamination)
+
+    if best_model is None:
+        return None, {"status": "skipped_no_valid_model", "n_rows": int(len(X))}
+
+    return best_model, {
+        "status": "ok",
+        "n_rows": int(len(X)),
+        "best_contamination": best_contamination,
+        "best_silhouette": float(best_score),
+        "train_outliers": int(np.sum(best_preds == -1)),
+    }
+
+
+def fit_iforest_models_by_type(
+    train_df: pd.DataFrame,
+    columns_to_check: list[str],
+    contamination_values: list[float] | None = None,
+    type_col: str = "type",
+    random_state: int = 42,
+    verbose: bool = False,
+) -> tuple[dict[str, IsolationForest | None], dict[str, dict]]:
+    fitted_models: dict[str, IsolationForest | None] = {}
+    fitted_meta: dict[str, dict] = {}
+
+    for type_value, df_type in train_df.groupby(type_col, sort=False):
+        model, meta = _select_iforest_model_for_frame(
+            df_type,
+            columns_to_check=columns_to_check,
+            contamination_values=contamination_values,
+            random_state=random_state,
+            verbose=verbose,
+        )
+        fitted_models[str(type_value)] = model
+        fitted_meta[str(type_value)] = meta
+    return fitted_models, fitted_meta
+
+
+def apply_iforest_models(
+    df: pd.DataFrame,
+    models_by_type: dict[str, IsolationForest | None],
+    columns_to_check: list[str],
+    type_col: str = "type",
+) -> pd.Series:
+    flags = pd.Series(False, index=df.index, dtype=bool)
+
+    for type_value, df_type in df.groupby(type_col, sort=False):
+        model = models_by_type.get(str(type_value))
+        if model is None:
+            continue
+
+        X = df_type[columns_to_check].dropna().astype(np.float64)
+        if X.empty:
+            continue
+        preds = model.predict(X)
+        flags.loc[X.index] = preds == -1
+    return flags
+
+
+def materialize_official_cleaning_audit(
+    split_id: str = "init_temporal_processed_v1",
+    target: str = "init",
+    cleaning_policy_id: str = DEFAULT_OFFICIAL_CLEANING_POLICY_ID,
+    force: bool = False,
+    verbose: bool = True,
+    random_state: int = 42,
+    train_drop_cap_fraction: float = DEFAULT_TRAIN_DROP_CAP_FRACTION,
+) -> dict:
+    """
+    Fit learned cleaning on the official TRAIN split only and materialize the
+    resulting row-level audit for train/val/test.
+    """
+    from data.splits import load_official_assigned_source_frame, partition_official_source_frame
+
+    cleaning_dir = _official_cleaning_dir(split_id, cleaning_policy_id=cleaning_policy_id)
+    manifest_path = cleaning_dir / "manifest.json"
+    row_status_path = cleaning_dir / "row_status.csv"
+    univariate_rules_path = cleaning_dir / "artifacts" / "univariate_rules.json"
+    iforest_models_path = cleaning_dir / "artifacts" / "iforest_models.joblib"
+
+    if (
+        manifest_path.exists()
+        and row_status_path.exists()
+        and univariate_rules_path.exists()
+        and iforest_models_path.exists()
+        and not force
+    ):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    split_manifest, assigned_source = load_official_assigned_source_frame(
+        split_id=split_id,
+        target=target,
+        verbose=verbose,
+    )
+    working_df = prepare_statistical_cleaning_frame(assigned_source, target=target)
+    spec = build_statistical_cleaning_spec(working_df, target=target, verbose=verbose)
+    partitions = partition_official_source_frame(working_df)
+
+    train_df = partitions["train"]
+    univariate_rules = fit_univariate_density_rules(
+        train_df=train_df,
+        filter_columns=spec["filter_cols"],
+        phase_columns=spec["phase_cols"],
+        thresholds=spec["thresholds"],
+        n_bins=spec["n_bins"],
+        only_threshold=spec["only_threshold"],
+        type_col="type",
+        random_state=random_state,
+        verbose=False,
+    )
+    iforest_models, iforest_meta = fit_iforest_models_by_type(
+        train_df=train_df,
+        columns_to_check=spec["all_filter_cols"],
+        contamination_values=spec["contamination_values"],
+        type_col="type",
+        random_state=random_state,
+        verbose=False,
+    )
+
+    row_status_frames = []
+    summary_by_split: dict[str, dict] = {}
+    class_counts_post_cleaning_by_split: dict[str, dict[str, int]] = {}
+    class_counts_pre_cleaning_by_split: dict[str, dict[str, int]] = {}
+    train_drop_guardrail: dict[str, object] = {
+        "global_cap_fraction": float(train_drop_cap_fraction),
+        "global_cap_rows": None,
+        "candidate_overlap_rows": None,
+        "applied_drop_rows": None,
+        "cap_exceeded": False,
+        "fallback_mode": None,
+        "by_class": {},
+        "warnings": [],
+    }
+    for split_name, split_df in partitions.items():
+        uni_keep = apply_univariate_density_rules(split_df, univariate_rules, type_col="type")
+        iforest_flags = apply_iforest_models(
+            split_df,
+            models_by_type=iforest_models,
+            columns_to_check=spec["all_filter_cols"],
+            type_col="type",
+        )
+
+        overlap_flags = (~uni_keep) & iforest_flags
+
+        status_df = split_df[["split_row_id", "source_row_number", "split"]].copy()
+        status_df["uni_removal_flag"] = (~uni_keep).astype(int)
+        status_df["Outlier_IForest"] = iforest_flags.astype(bool)
+        status_df["overlap_flag"] = overlap_flags.astype(int)
+        status_df["or_removal_flag"] = (
+            (status_df["uni_removal_flag"] == 1) | status_df["Outlier_IForest"]
+        ).astype(int)
+
+        if split_name == "train":
+            max_drop_rows = int(np.floor(train_drop_cap_fraction * len(status_df)))
+            drop_for_model = overlap_flags.copy()
+            candidate_overlap_rows = int(overlap_flags.sum())
+            cap_exceeded = candidate_overlap_rows > max_drop_rows
+            fallback_mode = "drop_overlap"
+
+            if cap_exceeded:
+                drop_for_model = pd.Series(False, index=split_df.index, dtype=bool)
+                fallback_mode = "flag_only_due_to_global_cap"
+
+            class_guardrail, class_warnings = _train_drop_warnings_by_class(
+                split_df=split_df,
+                drop_mask=drop_for_model,
+                type_col="type",
+            )
+            train_drop_guardrail = {
+                "global_cap_fraction": float(train_drop_cap_fraction),
+                "global_cap_rows": int(max_drop_rows),
+                "candidate_overlap_rows": candidate_overlap_rows,
+                "applied_drop_rows": int(drop_for_model.sum()),
+                "cap_exceeded": bool(cap_exceeded),
+                "fallback_mode": fallback_mode,
+                "by_class": class_guardrail,
+                "warnings": class_warnings,
+            }
+        else:
+            drop_for_model = pd.Series(False, index=split_df.index, dtype=bool)
+
+        status_df["drop_for_model_flag"] = drop_for_model.astype(int)
+        status_df["kept_for_model"] = status_df["drop_for_model_flag"] == 0
+        row_status_frames.append(status_df)
+
+        class_counts_pre_cleaning = _counts_by_class(split_df["type"])
+        kept_mask = status_df["kept_for_model"].to_numpy(dtype=bool)
+        class_counts_post_cleaning = _counts_by_class(split_df.loc[kept_mask, "type"])
+        class_counts_pre_cleaning_by_split[split_name] = class_counts_pre_cleaning
+        class_counts_post_cleaning_by_split[split_name] = class_counts_post_cleaning
+        summary_by_split[split_name] = {
+            "n_rows": int(len(status_df)),
+            "kept_rows": int(status_df["kept_for_model"].sum()),
+            "dropped_rows": int(status_df["drop_for_model_flag"].sum()),
+            "drop_fraction": round(float(status_df["drop_for_model_flag"].mean()), 6),
+            "univariate_flagged_rows": int(status_df["uni_removal_flag"].sum()),
+            "iforest_flagged_rows": int(status_df["Outlier_IForest"].sum()),
+            "overlap_flagged_rows": int(status_df["overlap_flag"].sum()),
+            "union_flagged_rows": int(status_df["or_removal_flag"].sum()),
+            "holdout_policy": "flag_only" if split_name in {"val", "test"} else "train_drop_overlap_cap",
+        }
+
+    row_status = (
+        pd.concat(row_status_frames, ignore_index=True)
+        .sort_values(["source_row_number"])
+        .reset_index(drop=True)
+    )
+
+    if not row_status["split_row_id"].is_unique:
+        raise ValueError("Official cleaning audit produced duplicated split_row_id values.")
+    if not row_status["source_row_number"].is_unique:
+        raise ValueError("Official cleaning audit produced duplicated source_row_number values.")
+
+    cleaning_dir.mkdir(parents=True, exist_ok=True)
+    (cleaning_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+    row_status.to_csv(row_status_path, index=False)
+    dump_json(univariate_rules, univariate_rules_path)
+    joblib.dump(
+        {
+            "models_by_type": iforest_models,
+            "metadata_by_type": iforest_meta,
+            "columns_to_check": spec["all_filter_cols"],
+            "type_col": "type",
+            "random_state": random_state,
+        },
+        iforest_models_path,
+    )
+
+    manifest = {
+        "split_id": split_id,
+        "target": target,
+        "status": "official",
+        "policy_status": _cleaning_policy_status(cleaning_policy_id),
+        "cleaning_policy_id": cleaning_policy_id,
+        "fit_split": "train",
+        "drop_rule": "train_overlap_only_with_global_cap",
+        "holdout_policy": "flag_only",
+        "train_drop_cap_fraction_global": float(train_drop_cap_fraction),
+        "source_split_manifest": path_relative_to_root(
+            ROOT_PATH / "data" / "splits" / "official" / split_id / "manifest.json"
+        ),
+        "source_stage": split_manifest.get("source_stage"),
+        "source_file": split_manifest.get("source_file"),
+        "source_file_sha256": split_manifest.get("source_file_sha256_verified", split_manifest.get("source_file_sha256")),
+        "random_state": int(random_state),
+        "artifacts": {
+            "row_status": path_relative_to_root(row_status_path),
+            "univariate_rules": path_relative_to_root(univariate_rules_path),
+            "iforest_models": path_relative_to_root(iforest_models_path),
+        },
+        "row_status_columns": row_status.columns.tolist(),
+        "columns_used_for_cleaning": {
+            "univariate": spec["filter_cols"],
+            "phase": spec["phase_cols"],
+            "iforest": spec["all_filter_cols"],
+        },
+        "quality_filter_policy": {
+            "sum_columns": "treated_as_domain_quality_filter_upstream",
+        },
+        "summary_by_split": summary_by_split,
+        "class_counts_pre_cleaning_by_split": class_counts_pre_cleaning_by_split,
+        "class_counts_post_cleaning_by_split": class_counts_post_cleaning_by_split,
+        "train_drop_guardrail": train_drop_guardrail,
+        "iforest_selection_by_type": iforest_meta,
+    }
+    dump_json(manifest, manifest_path)
+
+    if verbose:
+        log(f"✅ Official cleaning audit materialized at: {cleaning_dir}", verbose)
+    return manifest
+
+
+def load_official_cleaning_audit(
+    split_id: str = "init_temporal_processed_v1",
+    target: str = "init",
+    cleaning_policy_id: str = DEFAULT_OFFICIAL_CLEANING_POLICY_ID,
+    force: bool = False,
+    verbose: bool = True,
+) -> tuple[dict, pd.DataFrame]:
+    cleaning_dir = _official_cleaning_dir(split_id, cleaning_policy_id=cleaning_policy_id)
+    manifest_path = cleaning_dir / "manifest.json"
+    row_status_path = cleaning_dir / "row_status.csv"
+
+    if force or not manifest_path.exists() or not row_status_path.exists():
+        materialize_official_cleaning_audit(
+            split_id=split_id,
+            target=target,
+            cleaning_policy_id=cleaning_policy_id,
+            force=force,
+            verbose=verbose,
+        )
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    row_status = pd.read_csv(row_status_path)
+    return manifest, row_status
+
+
+def load_official_modeling_source_frame(
+    split_id: str = "init_temporal_processed_v1",
+    target: str = "init",
+    cleaning_policy_id: str = DEFAULT_OFFICIAL_CLEANING_POLICY_ID,
+    force: bool = False,
+    verbose: bool = True,
+) -> tuple[dict, pd.DataFrame]:
+    """
+    Return the processed source rows kept for modeling after applying the
+    official split-aware learned cleaning audit.
+    """
+    from data.splits import load_official_assigned_source_frame
+
+    split_manifest, assigned_source = load_official_assigned_source_frame(
+        split_id=split_id,
+        target=target,
+        verbose=verbose,
+    )
+    cleaning_manifest, row_status = load_official_cleaning_audit(
+        split_id=split_id,
+        target=target,
+        cleaning_policy_id=cleaning_policy_id,
+        force=force,
+        verbose=verbose,
+    )
+
+    working_df = prepare_statistical_cleaning_frame(assigned_source, target=target)
+    merged = working_df.merge(
+        row_status,
+        on=["split_row_id", "source_row_number", "split"],
+        how="inner",
+        validate="one_to_one",
+    )
+    if len(merged) != len(working_df):
+        raise ValueError(
+            f"Official cleaning audit does not cover the full working source: {len(merged)} rows vs {len(working_df)}."
+        )
+
+    kept_df = (
+        merged[merged["kept_for_model"]]
+        .copy()
+        .sort_values(["date", "source_row_number"])
+        .reset_index(drop=True)
+    )
+    manifest = {
+        "split_id": split_id,
+        "target": target,
+        "cleaning_policy_id": cleaning_policy_id,
+        "source_split_manifest": cleaning_manifest["source_split_manifest"],
+        "source_cleaning_manifest": path_relative_to_root(
+            _official_cleaning_dir(split_id, cleaning_policy_id=cleaning_policy_id) / "manifest.json"
+        ),
+        "source_file": split_manifest.get("source_file"),
+        "source_file_sha256": split_manifest.get("source_file_sha256_verified", split_manifest.get("source_file_sha256")),
+    }
+    return manifest, kept_df
 
 
 
