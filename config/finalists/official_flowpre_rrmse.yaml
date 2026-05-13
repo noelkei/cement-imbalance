@@ -1,0 +1,80 @@
+artifact_id: official_flowpre_rrmse
+registry_version: finalists_registry_v1
+line: official
+model_family: flowpre
+selection_role: rrmse
+selection_status: closed
+selection_phase: flowpre_finalists_v1
+semantic_role: specialized scaler/upstream for dataset derivation under the rrmse_primary
+  lens
+split_id: init_temporal_processed_v1
+cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+source_id: flowpre__rrmse__init_temporal_processed_v1__v1
+selected_run_id: flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1
+selected_seed: 5678
+cfg_signature: hf256_l3_rq3_lr1e-4_mson_skoff
+family_policy_id: null
+upstream_dependencies:
+  official_split_id: init_temporal_processed_v1
+  cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+  raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_rrmse.yaml
+results_summary_ref: config/finalists/official_flowpre_rrmse.yaml
+results_summary:
+  selection_lens: rrmse_primary
+  n_runs_aggregated: 4
+  training_summary:
+    best_epoch: 75
+    total_epochs: 99
+    seed: 5678
+    train:
+      rrmse_recon: 0.0017449621809646487
+      r2_recon: 0.9999324083328247
+      rrmse_mean_whole: 0.03421823643620402
+      rrmse_std_whole: 0.039276371631232244
+    val:
+      rrmse_recon: 3.0965244945946324e-07
+      r2_recon: 1.0
+      rrmse_mean_whole: 0.300654802834652
+      rrmse_std_whole: 0.20415318923269263
+rationale_summary:
+- Esta carpeta representa la lente rrmse_primary.
+- 'Propósito operativo:'
+- usar un scaler FlowPre orientado a reconstrucción global equilibrada, con peso explícito
+  sobre train_sum_rrmse, val_sum_rrmse, gap_val_train_sum y los ratios de balance
+  entre media y desviación estándar.
+- 'Rol vigente:'
+- este artefacto sirve como scaler/upstream especializado para escalar dataset y derivar
+  variantes de dataset. No es una base principal de entrenamiento de FlowGen.
+- 'Selección cerrada:'
+- 'cfg elegida: hf256|l3|rq1x3|frq3|lr1e-4|mson|skoff'
+- 'seed elegida: 5678'
+local_artifact_refs:
+  promotion_manifest:
+    path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1_promotion_manifest.json
+    visibility: local_only
+  run_manifest:
+    path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1_run_manifest.json
+    visibility: local_only
+  config:
+    path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1.yaml
+    visibility: local_only
+  results:
+    path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1_results.yaml
+    visibility: local_only
+  rationale_md:
+    path: outputs/models/official/flowpre_finalists/rrmse/RATIONALE.md
+    visibility: local_only
+  readme_md:
+    path: outputs/models/official/flowpre_finalists/README.md
+    visibility: local_only
+integrity:
+  manifest_sha256: 58e8f16c3a10cc2fc11bd4e0e724cf21d3c9574eff1946b1fca4b3a7d7e9be43
+  config_sha256: 6d5b51d499d7d0b98c8a180f7f9235b8d4d4c5d47d3facdb0f37cd600ca0ca4c
+  results_sha256: e74bfbbe53f04f27fed4961a67892952c0eddc4c2eddcc4352b98c63007baba4
+  rationale_sha256:
+    outputs/models/official/flowpre_finalists/rrmse/RATIONALE.md: 29a378f6be9a956544f02a60ccd6e484068cdc483e8140c5dd9a02737ab657fc
+notes:
+  historical_support_only: false
+  branch_id: rrmse
+  is_flowgen_work_base: false

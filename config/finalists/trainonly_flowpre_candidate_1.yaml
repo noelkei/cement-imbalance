@@ -1,0 +1,95 @@
+artifact_id: trainonly_flowpre_candidate_1
+registry_version: finalists_registry_v1
+line: experimental_train_only
+model_family: flowpre
+selection_role: candidate_trainonly_1
+selection_status: closed
+selection_phase: flowpre_trainonly_finalists_v1
+semantic_role: primary train-only FlowGen prior for local downstream comparison
+split_id: init_temporal_processed_v1
+cleaning_policy_id: null
+source_id: flowpre__candidate_trainonly_1__init_temporal_processed_v1__v1
+selected_run_id: flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1
+selected_seed: 6769
+cfg_signature: hf224|l3|rq1x5|frq5|lr1e-3|mson|skoff
+family_policy_id: null
+upstream_dependencies:
+  official_split_id: init_temporal_processed_v1
+  monitoring_policy: train_only
+  expected_flowgen_role: primary train-only prior
+config_snapshot_ref: config/finalists/config_snapshots/trainonly_flowpre_candidate_1.yaml
+results_summary_ref: config/finalists/trainonly_flowpre_candidate_1.yaml
+results_summary:
+  selection_basis: family-level ranking over 5 seeds in the experimental train-only
+    branch, followed by seed-level selection for the FlowGen work base
+  selected_family_rank: 1
+  family_panel_seeds:
+  - 6769
+  - 7319
+  - 8423
+  - 9547
+  - 10627
+  selected_run_key_metrics:
+    train_rrmse_recon: 4.13863517678692e-06
+    train_sum_rrmse: 0.02566423984904424
+    train_mvn_score: 0.24795447634862994
+    pc_worst_sum: 0.11955928730911732
+    pc_macro_sum: 0.10281971089055827
+    minority_pc_sum: 0.116340438876577
+    best_epoch: 176
+    total_epochs: 181
+  family_aggregate_metrics:
+    family_final_score: -1.0040318740562595
+    per_class_prior_fit_score: -2.814097766154303
+    global_prior_fit_score: 0.28314051328301376
+    artifact_robustness_score: 0.0841384607253821
+    overfit_risk_score: -1.358896985249813
+    pc_worst_sum: 0.12134378024910146
+    pc_macro_sum: 0.09925859774601095
+    minority_pc_sum: 0.10758674600190762
+    train_sum_rrmse: 0.025678523611793964
+    train_mvn_score: 0.25364053083594357
+    train_rrmse_recon: 8.942655413193278e-05
+    family_overfit_risk_level: low
+    family_risk_flags: late_best_epoch; seed_dispersion_high; tail_still_improving
+    family_severe_flags: none
+rationale_summary:
+- Esta carpeta materializa el **prior principal** de FlowPre train-only para arrancar
+  FlowGen train-only.
+- 'Rol operativo:'
+- 'nombre lógico: candidate_trainonly_1'
+- 'alias: primary'
+- 'uso esperado: base principal de trabajo para FlowGen train-only'
+- 'Selección cerrada:'
+- 'cfg elegida: hf224|l3|rq1x5|frq5|lr1e-3|mson|skoff'
+- 'familia rankeada: #1 en el análisis family-level con 5 seeds'
+local_artifact_refs:
+  promotion_manifest:
+    path: outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_1/promotion_manifest.json
+    visibility: local_only
+  run_manifest:
+    path: outputs/models/experimental/train_only/flow_pre/explore12/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1_run_manifest.json
+    visibility: local_only
+  config:
+    path: outputs/models/experimental/train_only/flow_pre/explore12/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1.yaml
+    visibility: local_only
+  results:
+    path: outputs/models/experimental/train_only/flow_pre/explore12/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1_results.yaml
+    visibility: local_only
+  rationale_md:
+    path: outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_1/RATIONALE.md
+    visibility: local_only
+  readme_md:
+    path: outputs/models/experimental/train_only/flowpre_finalists/README.md
+    visibility: local_only
+integrity:
+  manifest_sha256: 1ce4ddf62be3b0ee6c20ec08307e0ee900a209dd5f4ffdcb11367cd7c67d4966
+  config_sha256: 608bfe3e7dab793af3e26b6ef73768e03ca3c88dc1779134fc5c80655ed7f327
+  results_sha256: 791bed1ede75f5605f0f0fc7ce1122465454deb017db6092a8b1f8b664ad74dc
+  rationale_sha256:
+    outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_1/RATIONALE.md: 8732e31678f4e93b9c54ca449c176b425a9ae8b6f109fd75dc06fc8c51a6cbf6
+notes:
+  selection_alias: primary
+  monitoring_note: The results key 'val' is a train-derived pseudo-validation surface
+    and not the official temporal validation split.
+  is_flowgen_work_base: true

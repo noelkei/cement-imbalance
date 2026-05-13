@@ -1,0 +1,78 @@
+artifact_id: official_flowpre_fair
+registry_version: finalists_registry_v1
+line: official
+model_family: flowpre
+selection_role: fair
+selection_status: closed
+selection_phase: flowpre_finalists_v1
+semantic_role: specialized scaler/upstream for dataset derivation under the fair lens
+split_id: init_temporal_processed_v1
+cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+source_id: flowpre__fair__init_temporal_processed_v1__v1
+selected_run_id: flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1
+selected_seed: 5678
+cfg_signature: hf192_l3_rq6_lr1e-3_mson_skoff
+family_policy_id: null
+upstream_dependencies:
+  official_split_id: init_temporal_processed_v1
+  cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+  raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_fair.yaml
+results_summary_ref: config/finalists/official_flowpre_fair.yaml
+results_summary:
+  selection_lens: fair
+  n_runs_aggregated: 4
+  training_summary:
+    best_epoch: 84
+    total_epochs: 101
+    seed: 5678
+    train:
+      rrmse_recon: 0.00011638522119028494
+      r2_recon: 0.9999997019767761
+      rrmse_mean_whole: 0.06879540008037069
+      rrmse_std_whole: 0.01773993682563901
+    val:
+      rrmse_recon: 1.6851670352480141e-06
+      r2_recon: 1.0
+      rrmse_mean_whole: 0.41114157938042467
+      rrmse_std_whole: 0.09681556188916114
+rationale_summary:
+- Esta carpeta representa la lente fair.
+- 'Propósito operativo:'
+- usar un scaler FlowPre que prioriza equilibrio entre clases en el espacio transformado,
+  penalizando peores clases y dispersión desigual entre clases.
+- 'Rol vigente:'
+- este artefacto sirve como scaler/upstream especializado para escalar dataset y derivar
+  variantes de dataset. No es una base principal de entrenamiento de FlowGen.
+- 'Selección cerrada:'
+- 'cfg elegida: hf192|l3|rq1x6|frq6|lr1e-3|mson|skoff'
+- 'seed elegida: 5678'
+local_artifact_refs:
+  promotion_manifest:
+    path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1_promotion_manifest.json
+    visibility: local_only
+  run_manifest:
+    path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1_run_manifest.json
+    visibility: local_only
+  config:
+    path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1.yaml
+    visibility: local_only
+  results:
+    path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1_results.yaml
+    visibility: local_only
+  rationale_md:
+    path: outputs/models/official/flowpre_finalists/fair/RATIONALE.md
+    visibility: local_only
+  readme_md:
+    path: outputs/models/official/flowpre_finalists/README.md
+    visibility: local_only
+integrity:
+  manifest_sha256: b57b6378fa75669470859c8cb17a8d9b8659a2639bc5785445716c5547c5ff47
+  config_sha256: 4ea007e7fbc51ac2d6f592726664eb2ed32f97e34ae6c4064c91f4c2073bd7f0
+  results_sha256: 6064098d2489603ee8d83619416bd2bf9a4a398a34ce5f9d673f802a6923172a
+  rationale_sha256:
+    outputs/models/official/flowpre_finalists/fair/RATIONALE.md: a4a3eef9ca8fa7bfc9d8ed2d12c04dc4815b2a8a8aeabf41d00e695b947e9542
+notes:
+  historical_support_only: false
+  branch_id: fair
+  is_flowgen_work_base: false

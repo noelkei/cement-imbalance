@@ -1,0 +1,82 @@
+artifact_id: official_flowpre_candidate_2
+registry_version: finalists_registry_v1
+line: official
+model_family: flowpre
+selection_role: candidate_2
+selection_status: closed
+selection_phase: flowpre_finalists_v1
+semantic_role: secondary official FlowGen work base with robust/hybrid bias
+split_id: init_temporal_processed_v1
+cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+source_id: flowpre__candidate_2__init_temporal_processed_v1__v1
+selected_run_id: flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1
+selected_seed: 2468
+cfg_signature: hf256_l4_rq5_lr1e-3_mson_skoff
+family_policy_id: null
+upstream_dependencies:
+  official_split_id: init_temporal_processed_v1
+  cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+  raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_candidate_2.yaml
+results_summary_ref: config/finalists/official_flowpre_candidate_2.yaml
+results_summary:
+  selection_lens: flowgencandidate_robust_hybrid
+  n_runs_aggregated: 4
+  training_summary:
+    best_epoch: 37
+    total_epochs: 70
+    seed: 2468
+    train:
+      rrmse_recon: 0.0010252549545839429
+      r2_recon: 0.999976634979248
+      rrmse_mean_whole: 0.08434348813366344
+      rrmse_std_whole: 0.03614922224251755
+    val:
+      rrmse_recon: 6.862824193376582e-07
+      r2_recon: 1.0
+      rrmse_mean_whole: 0.35347316196714296
+      rrmse_std_whole: 0.1683172652107572
+rationale_summary:
+- Esta carpeta no representa un scaler descriptivo, sino un finalista operativo para
+  FlowGen.
+- 'Rol operativo:'
+- candidate_2 es la base con sesgo más robust/hybrid, pensada para servir como espacio
+  finalista cuando interesa estabilidad práctica y buen comportamiento conjunto en
+  flowgencandidate_robust y flowgencandidate_hybrid.
+- 'Estado vigente:'
+- candidate_2 es una base real de trabajo para arrancar y desarrollar la fase FlowGen.
+  Una vez FlowGen quede cerrado y existan outputs generativos promovidos, esta carpeta
+  pasa a ser trazabilidad histórica y deja de ser un artefacto activo/canónico de
+  uso.
+- 'Selección cerrada:'
+- 'cfg elegida: hf256|l4|rq1x5|frq5|lr1e-3|mson|skoff'
+- 'seed elegida: 2468'
+local_artifact_refs:
+  promotion_manifest:
+    path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1_promotion_manifest.json
+    visibility: local_only
+  run_manifest:
+    path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1_run_manifest.json
+    visibility: local_only
+  config:
+    path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1.yaml
+    visibility: local_only
+  results:
+    path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1_results.yaml
+    visibility: local_only
+  rationale_md:
+    path: outputs/models/official/flowpre_finalists/candidate_2/RATIONALE.md
+    visibility: local_only
+  readme_md:
+    path: outputs/models/official/flowpre_finalists/README.md
+    visibility: local_only
+integrity:
+  manifest_sha256: 880a8a20ebf3ef6df580cce1bd96eadd1eb1d8428fb29efe5a4a9241dbd26b7a
+  config_sha256: d38145128a1981e59063b7c1813d504d67438f2e3966535c7f9ada87b998b729
+  results_sha256: ef2c2129dd3eb77d3a3bd33a13d9ed480af561a320e3129072b0319b9a846be3
+  rationale_sha256:
+    outputs/models/official/flowpre_finalists/candidate_2/RATIONALE.md: ddbe3cf290b1f213b9c3047be04b1b76176e5f7a42f838bc8d02e13e7803066e
+notes:
+  historical_support_only: false
+  branch_id: candidate_2
+  is_flowgen_work_base: true

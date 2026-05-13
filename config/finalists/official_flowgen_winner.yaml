@@ -1,0 +1,120 @@
+artifact_id: official_flowgen_winner
+registry_version: finalists_registry_v1
+line: official
+model_family: flowgen
+selection_role: unique_official_finalist
+selection_status: closed
+selection_phase: flowgen_finalist_v1
+semantic_role: unique official FlowGen winner promoted for downstream comparison
+split_id: init_temporal_processed_v1
+cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+source_id: flowgen__winner__init_temporal_processed_v1__v1
+selected_run_id: flowgen_tpv1_c2_train_e03_seed2468_v1
+selected_seed: 2468
+cfg_signature: null
+family_policy_id: E03
+upstream_dependencies:
+  branch_id: candidate_2
+  paired_flowpre_source_id: flowpre__candidate_2__init_temporal_processed_v1__v1
+  paired_flowpre_run_id: flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1
+  raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+config_snapshot_ref: config/finalists/config_snapshots/official_flowgen_winner.yaml
+results_summary_ref: config/finalists/official_flowgen_winner.yaml
+results_summary:
+  family_policy_id: E03
+  family_seed_set:
+  - 1117
+  - 2221
+  - 2468
+  - 3331
+  - 4447
+  selection_lenses:
+  - TrainStrong60
+  - ValTemporalGuard
+  - banded
+  - classic
+  selection_temporal_metrics:
+  - ratio25
+  - ratio50
+  - Q3peak
+  selection_metrics:
+    trainstrong60_score: 12.9834
+    val_temporal_guard_score: 2.791234
+    banded_score: 10.857
+    classic_score: 2952.343545
+    ratio25: 0.154746
+    ratio50: 0.453356
+    q3peak: 1.258563
+  selection_within_family_ranks:
+    TrainStrong60: 3
+    ValTemporalGuard: 1
+    banded: 3
+    classic: 1
+    ratio25: 1
+    ratio50: 2
+    Q3peak: 2
+  selection_reason: 'Selected as the best final seed inside the winning E03 family
+    because it is the strongest temporal-closeout compromise: best ValTemporalGuard,
+    best classic, best ratio25, second-best ratio50 and Q3peak, while staying top-3
+    in TrainStrong60 and banded.'
+  training_summary:
+    phase1:
+      best_epoch: null
+      total_epochs: 0
+      ramp_rebase_epoch: null
+    finetune:
+      enabled: true
+      best_epoch: 65
+      total_epochs: 70
+      ramp_rebase_epoch: 4
+    train:
+      rrmse_x_recon: 0.00046341316192410886
+      rrmse_y_recon: 1.3804130503558554e-05
+      r2_x_recon: 0.999995231628418
+      r2_y_recon: 1.0
+      realism_overall:
+        ks_mean: 0.1903369490802288
+        w1_mean: 2720.7955615234373
+        xy_pearson_fro_rel: 0.4972452300786972
+        xy_spearman_fro_rel: 0.5464938020706177
+        mmd2_ratio: 122.71220458984375
+rationale_summary:
+- Esta carpeta no representa una familia exploratoria ni un winner operativo provisional.
+- Representa el finalista oficial único y vigente de FlowGen.
+- 1. la exploración oficial de FlowGen se cerró primero con una selección pre-reseed;
+- 2. después se ejecutó el reseed final sobre 5 cfg candidatas;
+- 3. la agregación post-reseed a 5 seeds por cfg dio como familia ganadora final a
+  E03;
+- 4. dentro de esa familia ganadora se eligió una única seed concreta para promoción
+  oficial final.
+- 'cfg/familia ganadora: flowgen_tpv1_c2_train_e03_seed2468_v1'
+- 'panel comparado dentro de la familia:'
+local_artifact_refs:
+  selection_manifest:
+    path: outputs/models/official/flowgen_finalist/flowgen_final_selection_manifest.json
+    visibility: local_only
+  run_manifest:
+    path: outputs/models/official/flowgen_finalist/flowgen_tpv1_c2_train_e03_seed2468_v1/run_manifest.json
+    visibility: local_only
+  config:
+    path: outputs/models/official/flowgen_finalist/flowgen_tpv1_c2_train_e03_seed2468_v1/flowgen_tpv1_c2_train_e03_seed2468_v1.yaml
+    visibility: local_only
+  results:
+    path: outputs/models/official/flowgen_finalist/flowgen_tpv1_c2_train_e03_seed2468_v1/results.yaml
+    visibility: local_only
+  rationale_md:
+    path: outputs/models/official/flowgen_finalist/RATIONALE.md
+    visibility: local_only
+  readme_md:
+    path: outputs/models/official/flowgen_finalist/README.md
+    visibility: local_only
+integrity:
+  manifest_sha256: ac86fccdcf0b536084bda3958c1c1e3ec12c5b653add426f0222702e86f9d0b5
+  config_sha256: e1c903b3899b323b1cd1e26e06576c600df6c746d4fb3eda9d71bbe962ad4eb3
+  results_sha256: 02ff2a982d6a416c82b2575d2ed61ec6dc44661d8ac55ac5e0eadbd0eecbf19c
+  rationale_sha256:
+    outputs/models/official/flowgen_finalist/RATIONALE.md: 242b9451ffc187962c336cd03a62dc07ebf5f0a8da1e6bca4301ecdd99f832e7
+notes:
+  runner_up_run_id: flowgen_tpv1_c2_reseed_final_e03_srcv1_seed2221_v1
+  runner_up_seed: 2221
+  historical_support_only: false

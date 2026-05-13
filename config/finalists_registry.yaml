@@ -1,0 +1,431 @@
+registry_version: finalists_registry_v1
+artifacts:
+  official_flowpre_rrmse:
+    artifact_id: official_flowpre_rrmse
+    registry_version: finalists_registry_v1
+    line: official
+    model_family: flowpre
+    selection_role: rrmse
+    selection_status: closed
+    selection_phase: flowpre_finalists_v1
+    semantic_role: specialized scaler/upstream for dataset derivation under the rrmse_primary
+      lens
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+    source_id: flowpre__rrmse__init_temporal_processed_v1__v1
+    selected_run_id: flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1
+    selected_seed: 5678
+    cfg_signature: hf256_l3_rq3_lr1e-4_mson_skoff
+    family_policy_id: null
+    upstream_dependencies:
+      official_split_id: init_temporal_processed_v1
+      cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+      raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+    config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_rrmse.yaml
+    results_summary_ref: config/finalists/official_flowpre_rrmse.yaml
+    local_artifact_refs:
+      promotion_manifest:
+        path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1_promotion_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1_run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/official/flowpre_finalists/rrmse/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1/flowprex2_rrmse_tpv1_hf256_l3_rq3_lr1e-4_mson_skoff_seed5678_v1_results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/official/flowpre_finalists/rrmse/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/official/flowpre_finalists/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: 58e8f16c3a10cc2fc11bd4e0e724cf21d3c9574eff1946b1fca4b3a7d7e9be43
+      config_sha256: 6d5b51d499d7d0b98c8a180f7f9235b8d4d4c5d47d3facdb0f37cd600ca0ca4c
+      results_sha256: e74bfbbe53f04f27fed4961a67892952c0eddc4c2eddcc4352b98c63007baba4
+      rationale_sha256:
+        outputs/models/official/flowpre_finalists/rrmse/RATIONALE.md: 29a378f6be9a956544f02a60ccd6e484068cdc483e8140c5dd9a02737ab657fc
+  official_flowpre_mvn:
+    artifact_id: official_flowpre_mvn
+    registry_version: finalists_registry_v1
+    line: official
+    model_family: flowpre
+    selection_role: mvn
+    selection_status: closed
+    selection_phase: flowpre_finalists_v1
+    semantic_role: specialized scaler/upstream for dataset derivation under the mvn
+      lens
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+    source_id: flowpre__mvn__init_temporal_processed_v1__v1
+    selected_run_id: flowpre_rrmse_tpv1_rq5_seed5678_v1
+    selected_seed: 5678
+    cfg_signature: hf256_l4_rq5_lr1e-3_mson_skoff
+    family_policy_id: null
+    upstream_dependencies:
+      official_split_id: init_temporal_processed_v1
+      cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+      raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+    config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_mvn.yaml
+    results_summary_ref: config/finalists/official_flowpre_mvn.yaml
+    local_artifact_refs:
+      promotion_manifest:
+        path: outputs/models/official/flowpre_finalists/mvn/flowpre_rrmse_tpv1_rq5_seed5678_v1/flowpre_rrmse_tpv1_rq5_seed5678_v1_promotion_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/official/flowpre_finalists/mvn/flowpre_rrmse_tpv1_rq5_seed5678_v1/flowpre_rrmse_tpv1_rq5_seed5678_v1_run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/official/flowpre_finalists/mvn/flowpre_rrmse_tpv1_rq5_seed5678_v1/flowpre_rrmse_tpv1_rq5_seed5678_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/official/flowpre_finalists/mvn/flowpre_rrmse_tpv1_rq5_seed5678_v1/flowpre_rrmse_tpv1_rq5_seed5678_v1_results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/official/flowpre_finalists/mvn/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/official/flowpre_finalists/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: 5dc9e83664a549cfd66447e40599ba05a814816804f3526d9424c1e409c9c5b6
+      config_sha256: d38145128a1981e59063b7c1813d504d67438f2e3966535c7f9ada87b998b729
+      results_sha256: c4dc32337d417c2a28d7fbae4807c142cf70b9237f33ac682ad15a535342cdb9
+      rationale_sha256:
+        outputs/models/official/flowpre_finalists/mvn/RATIONALE.md: 2984e7f556701bf6f928f55915ec107ba4f6590fb8953bd6336729d3ab75c35d
+  official_flowpre_fair:
+    artifact_id: official_flowpre_fair
+    registry_version: finalists_registry_v1
+    line: official
+    model_family: flowpre
+    selection_role: fair
+    selection_status: closed
+    selection_phase: flowpre_finalists_v1
+    semantic_role: specialized scaler/upstream for dataset derivation under the fair
+      lens
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+    source_id: flowpre__fair__init_temporal_processed_v1__v1
+    selected_run_id: flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1
+    selected_seed: 5678
+    cfg_signature: hf192_l3_rq6_lr1e-3_mson_skoff
+    family_policy_id: null
+    upstream_dependencies:
+      official_split_id: init_temporal_processed_v1
+      cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+      raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+    config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_fair.yaml
+    results_summary_ref: config/finalists/official_flowpre_fair.yaml
+    local_artifact_refs:
+      promotion_manifest:
+        path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1_promotion_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1_run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/official/flowpre_finalists/fair/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1/flowprex4_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed5678_v1_results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/official/flowpre_finalists/fair/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/official/flowpre_finalists/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: b57b6378fa75669470859c8cb17a8d9b8659a2639bc5785445716c5547c5ff47
+      config_sha256: 4ea007e7fbc51ac2d6f592726664eb2ed32f97e34ae6c4064c91f4c2073bd7f0
+      results_sha256: 6064098d2489603ee8d83619416bd2bf9a4a398a34ce5f9d673f802a6923172a
+      rationale_sha256:
+        outputs/models/official/flowpre_finalists/fair/RATIONALE.md: a4a3eef9ca8fa7bfc9d8ed2d12c04dc4815b2a8a8aeabf41d00e695b947e9542
+  official_flowpre_candidate_1:
+    artifact_id: official_flowpre_candidate_1
+    registry_version: finalists_registry_v1
+    line: official
+    model_family: flowpre
+    selection_role: candidate_1
+    selection_status: closed
+    selection_phase: flowpre_finalists_v1
+    semantic_role: primary official FlowGen work base with priorfit bias
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+    source_id: flowpre__candidate_1__init_temporal_processed_v1__v1
+    selected_run_id: flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1
+    selected_seed: 9101
+    cfg_signature: hf192_l3_rq6_lr1e-3_mson_skoff
+    family_policy_id: null
+    upstream_dependencies:
+      official_split_id: init_temporal_processed_v1
+      cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+      raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+    config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_candidate_1.yaml
+    results_summary_ref: config/finalists/official_flowpre_candidate_1.yaml
+    local_artifact_refs:
+      promotion_manifest:
+        path: outputs/models/official/flowpre_finalists/candidate_1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1_promotion_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/official/flowpre_finalists/candidate_1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1_run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/official/flowpre_finalists/candidate_1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/official/flowpre_finalists/candidate_1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1/flowprers1_rrmse_tpv1_hf192_l3_rq6_lr1e-3_mson_skoff_seed9101_v1_results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/official/flowpre_finalists/candidate_1/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/official/flowpre_finalists/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: 836aefe8c199d9ae7564730ce1ba425c2330f2fbe271fb842821c94004698cf3
+      config_sha256: 4ea007e7fbc51ac2d6f592726664eb2ed32f97e34ae6c4064c91f4c2073bd7f0
+      results_sha256: a758583bddcfc21bc2251cc949ef56011ae04068e4145463d636a25d6e2140b4
+      rationale_sha256:
+        outputs/models/official/flowpre_finalists/candidate_1/RATIONALE.md: afb0b48d2ee015c22d1db6b074e9cb374b398890b27bae9f8e86efcf1d3d6fc9
+  official_flowpre_candidate_2:
+    artifact_id: official_flowpre_candidate_2
+    registry_version: finalists_registry_v1
+    line: official
+    model_family: flowpre
+    selection_role: candidate_2
+    selection_status: closed
+    selection_phase: flowpre_finalists_v1
+    semantic_role: secondary official FlowGen work base with robust/hybrid bias
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+    source_id: flowpre__candidate_2__init_temporal_processed_v1__v1
+    selected_run_id: flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1
+    selected_seed: 2468
+    cfg_signature: hf256_l4_rq5_lr1e-3_mson_skoff
+    family_policy_id: null
+    upstream_dependencies:
+      official_split_id: init_temporal_processed_v1
+      cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+      raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+    config_snapshot_ref: config/finalists/config_snapshots/official_flowpre_candidate_2.yaml
+    results_summary_ref: config/finalists/official_flowpre_candidate_2.yaml
+    local_artifact_refs:
+      promotion_manifest:
+        path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1_promotion_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1_run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/official/flowpre_finalists/candidate_2/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1/flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1_results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/official/flowpre_finalists/candidate_2/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/official/flowpre_finalists/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: 880a8a20ebf3ef6df580cce1bd96eadd1eb1d8428fb29efe5a4a9241dbd26b7a
+      config_sha256: d38145128a1981e59063b7c1813d504d67438f2e3966535c7f9ada87b998b729
+      results_sha256: ef2c2129dd3eb77d3a3bd33a13d9ed480af561a320e3129072b0319b9a846be3
+      rationale_sha256:
+        outputs/models/official/flowpre_finalists/candidate_2/RATIONALE.md: ddbe3cf290b1f213b9c3047be04b1b76176e5f7a42f838bc8d02e13e7803066e
+  official_flowgen_winner:
+    artifact_id: official_flowgen_winner
+    registry_version: finalists_registry_v1
+    line: official
+    model_family: flowgen
+    selection_role: unique_official_finalist
+    selection_status: closed
+    selection_phase: flowgen_finalist_v1
+    semantic_role: unique official FlowGen winner promoted for downstream comparison
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+    source_id: flowgen__winner__init_temporal_processed_v1__v1
+    selected_run_id: flowgen_tpv1_c2_train_e03_seed2468_v1
+    selected_seed: 2468
+    cfg_signature: null
+    family_policy_id: E03
+    upstream_dependencies:
+      branch_id: candidate_2
+      paired_flowpre_source_id: flowpre__candidate_2__init_temporal_processed_v1__v1
+      paired_flowpre_run_id: flowprers1_rrmse_tpv1_hf256_l4_rq5_lr1e-3_mson_skoff_seed2468_v1
+      raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+    config_snapshot_ref: config/finalists/config_snapshots/official_flowgen_winner.yaml
+    results_summary_ref: config/finalists/official_flowgen_winner.yaml
+    local_artifact_refs:
+      selection_manifest:
+        path: outputs/models/official/flowgen_finalist/flowgen_final_selection_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/official/flowgen_finalist/flowgen_tpv1_c2_train_e03_seed2468_v1/run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/official/flowgen_finalist/flowgen_tpv1_c2_train_e03_seed2468_v1/flowgen_tpv1_c2_train_e03_seed2468_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/official/flowgen_finalist/flowgen_tpv1_c2_train_e03_seed2468_v1/results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/official/flowgen_finalist/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/official/flowgen_finalist/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: ac86fccdcf0b536084bda3958c1c1e3ec12c5b653add426f0222702e86f9d0b5
+      config_sha256: e1c903b3899b323b1cd1e26e06576c600df6c746d4fb3eda9d71bbe962ad4eb3
+      results_sha256: 02ff2a982d6a416c82b2575d2ed61ec6dc44661d8ac55ac5e0eadbd0eecbf19c
+      rationale_sha256:
+        outputs/models/official/flowgen_finalist/RATIONALE.md: 242b9451ffc187962c336cd03a62dc07ebf5f0a8da1e6bca4301ecdd99f832e7
+  trainonly_flowpre_candidate_1:
+    artifact_id: trainonly_flowpre_candidate_1
+    registry_version: finalists_registry_v1
+    line: experimental_train_only
+    model_family: flowpre
+    selection_role: candidate_trainonly_1
+    selection_status: closed
+    selection_phase: flowpre_trainonly_finalists_v1
+    semantic_role: primary train-only FlowGen prior for local downstream comparison
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: null
+    source_id: flowpre__candidate_trainonly_1__init_temporal_processed_v1__v1
+    selected_run_id: flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1
+    selected_seed: 6769
+    cfg_signature: hf224|l3|rq1x5|frq5|lr1e-3|mson|skoff
+    family_policy_id: null
+    upstream_dependencies:
+      official_split_id: init_temporal_processed_v1
+      monitoring_policy: train_only
+      expected_flowgen_role: primary train-only prior
+    config_snapshot_ref: config/finalists/config_snapshots/trainonly_flowpre_candidate_1.yaml
+    results_summary_ref: config/finalists/trainonly_flowpre_candidate_1.yaml
+    local_artifact_refs:
+      promotion_manifest:
+        path: outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_1/promotion_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/experimental/train_only/flow_pre/explore12/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1_run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/experimental/train_only/flow_pre/explore12/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/experimental/train_only/flow_pre/explore12/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1_results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_1/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/experimental/train_only/flowpre_finalists/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: 1ce4ddf62be3b0ee6c20ec08307e0ee900a209dd5f4ffdcb11367cd7c67d4966
+      config_sha256: 608bfe3e7dab793af3e26b6ef73768e03ca3c88dc1779134fc5c80655ed7f327
+      results_sha256: 791bed1ede75f5605f0f0fc7ce1122465454deb017db6092a8b1f8b664ad74dc
+      rationale_sha256:
+        outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_1/RATIONALE.md: 8732e31678f4e93b9c54ca449c176b425a9ae8b6f109fd75dc06fc8c51a6cbf6
+  trainonly_flowpre_candidate_2:
+    artifact_id: trainonly_flowpre_candidate_2
+    registry_version: finalists_registry_v1
+    line: experimental_train_only
+    model_family: flowpre
+    selection_role: candidate_trainonly_2
+    selection_status: closed
+    selection_phase: flowpre_trainonly_finalists_v1
+    semantic_role: backup train-only FlowGen prior for local downstream comparison
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: null
+    source_id: flowpre__candidate_trainonly_2__init_temporal_processed_v1__v1
+    selected_run_id: flowpre_trainonly_top20_cfg11_hf256_l4_rq6_frq6_lr1e-3_mson_skoff_seed6769_v1
+    selected_seed: 6769
+    cfg_signature: hf256|l4|rq1x6|frq6|lr1e-3|mson|skoff
+    family_policy_id: null
+    upstream_dependencies:
+      official_split_id: init_temporal_processed_v1
+      monitoring_policy: train_only
+      expected_flowgen_role: backup train-only prior
+    config_snapshot_ref: config/finalists/config_snapshots/trainonly_flowpre_candidate_2.yaml
+    results_summary_ref: config/finalists/trainonly_flowpre_candidate_2.yaml
+    local_artifact_refs:
+      promotion_manifest:
+        path: outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_2/promotion_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/experimental/train_only/flow_pre/top20/flowpre_trainonly_top20_cfg11_hf256_l4_rq6_frq6_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_top20_cfg11_hf256_l4_rq6_frq6_lr1e-3_mson_skoff_seed6769_v1_run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/experimental/train_only/flow_pre/top20/flowpre_trainonly_top20_cfg11_hf256_l4_rq6_frq6_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_top20_cfg11_hf256_l4_rq6_frq6_lr1e-3_mson_skoff_seed6769_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/experimental/train_only/flow_pre/top20/flowpre_trainonly_top20_cfg11_hf256_l4_rq6_frq6_lr1e-3_mson_skoff_seed6769_v1/flowpre_trainonly_top20_cfg11_hf256_l4_rq6_frq6_lr1e-3_mson_skoff_seed6769_v1_results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_2/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/experimental/train_only/flowpre_finalists/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: 72e40127c0eb14484ea54f1f769459caa569ed7ad7d91f98898a84e430749e30
+      config_sha256: f5494e39cb8b53ad0d0a1e1bb749720482438f210b2efc03fdd5dcd1b11a59c4
+      results_sha256: bf5c5944a98c84a5720ecf5b79b7e59f952f44e3fe5e3b33ec4705c3cf83685c
+      rationale_sha256:
+        outputs/models/experimental/train_only/flowpre_finalists/candidate_trainonly_2/RATIONALE.md: 075474da941f54bc7aad0b23e257b02666d5068eee1993103824f7391ed2d26f
+  trainonly_flowgen_winner:
+    artifact_id: trainonly_flowgen_winner
+    registry_version: finalists_registry_v1
+    line: experimental_train_only
+    model_family: flowgen
+    selection_role: unique_trainonly_finalist
+    selection_status: closed
+    selection_phase: flowgen_trainonly_finalist_v1
+    semantic_role: unique local train-only FlowGen finalist for downstream comparison
+    split_id: init_temporal_processed_v1
+    cleaning_policy_id: trainfit_overlap_cap1pct_holdoutflag_v1
+    source_id: flowgen_trainonly__winner__init_temporal_processed_v1__v1
+    selected_run_id: flowgen_trainonly_tpv1_ct1_reseedfinal_r3a2_t06_clip125_seed15427_v1
+    selected_seed: 15427
+    cfg_signature: null
+    family_policy_id: R3A2_t06_clip125
+    upstream_dependencies:
+      branch_id: candidate_trainonly_1
+      paired_flowpre_source_id: flowpre__candidate_trainonly_1__init_temporal_processed_v1__v1
+      paired_flowpre_run_id: flowpre_trainonly_explore12_e09_hf224_l3_rq5_frq5_lr1e-3_mson_skoff_seed6769_v1
+      monitoring_policy: train_only
+      raw_bundle_dataset_name: df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1
+    config_snapshot_ref: config/finalists/config_snapshots/trainonly_flowgen_winner.yaml
+    results_summary_ref: config/finalists/trainonly_flowgen_winner.yaml
+    local_artifact_refs:
+      selection_manifest:
+        path: outputs/models/experimental/train_only/flowgen_finalist/flowgen_trainonly_final_selection_manifest.json
+        visibility: local_only
+      run_manifest:
+        path: outputs/models/experimental/train_only/flowgen/reseed_final/candidate_trainonly_1/flowgen_trainonly_tpv1_ct1_reseedfinal_r3a2_t06_clip125_seed15427_v1/run_manifest.json
+        visibility: local_only
+      config:
+        path: outputs/models/experimental/train_only/flowgen/reseed_final/candidate_trainonly_1/flowgen_trainonly_tpv1_ct1_reseedfinal_r3a2_t06_clip125_seed15427_v1/flowgen_trainonly_tpv1_ct1_reseedfinal_r3a2_t06_clip125_seed15427_v1.yaml
+        visibility: local_only
+      results:
+        path: outputs/models/experimental/train_only/flowgen/reseed_final/candidate_trainonly_1/flowgen_trainonly_tpv1_ct1_reseedfinal_r3a2_t06_clip125_seed15427_v1/results.yaml
+        visibility: local_only
+      rationale_md:
+        path: outputs/models/experimental/train_only/flowgen_finalist/RATIONALE.md
+        visibility: local_only
+      readme_md:
+        path: outputs/models/experimental/train_only/flowgen_finalist/README.md
+        visibility: local_only
+    integrity:
+      manifest_sha256: 71a392f8a7797e794e485c688c80c2902fad8d98807aba9d3ecdbdc82fc73236
+      config_sha256: fa07f7db26058be32d6ffd46bd985cde8f3ba32d018a676762905f44f502cccf
+      results_sha256: 82e174f8c14878453d94420e0340f206e55fe55109721f6335a7bb64005833ed
+      rationale_sha256:
+        outputs/models/experimental/train_only/flowgen_finalist/RATIONALE.md: c705e2b2d655b7293b34d528afe2a94c638051d279f5d8782f80df8de5a8fc0e

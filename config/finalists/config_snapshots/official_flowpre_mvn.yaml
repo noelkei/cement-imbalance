@@ -1,0 +1,62 @@
+model:
+  embedding_dim: 8
+  hidden_features: 256
+  num_layers: 4
+  use_actnorm: true
+  use_learnable_permutations: true
+  initial_affine_layers: 2
+  affine_rq_ratio:
+  - 1
+  - 5
+  n_repeat_blocks: 4
+  final_rq_layers: 5
+  lulinear_finisher: true
+  num_bins: 16
+  tail_bound: 3.0
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  num_epochs: 500
+  early_stopping_patience: 20
+  lr_decay_patience: 14
+  lr_decay_factor: 0.5
+  min_improvement: 0.05
+  min_improvement_floor: 0.0025
+  lr_patience_factor: 0.8
+  save_states: true
+  log_training: true
+  save_results: true
+  save_model: true
+  use_nll: true
+  use_logdet_penalty: false
+  logdet_penalty_weight: 0.0
+  use_logdet_abs: true
+  use_logdet_sq: true
+  ref_logdet: 40.0
+  logdet_scale_factor: true
+  use_mean_penalty: true
+  mean_penalty_weight: 2.5
+  use_mean_abs: true
+  use_mean_sq: true
+  use_std_penalty: true
+  std_penalty_weight: 1.25
+  use_std_abs: true
+  use_std_sq: true
+  use_skew_penalty: false
+  skew_penalty_weight: 0.004
+  use_skew_abs: true
+  use_skew_sq: true
+  use_kurtosis_penalty: false
+  kurtosis_penalty_weight: 0.0002
+  use_kurtosis_abs: true
+  use_kurtosis_sq: true
+  use_logpz_centering: false
+  logpz_centering_weight: 0.0
+  logpz_target: null
+  clamp_logabsdet_range: null
+interpretability:
+  save_influence: true
+  influence_step_fraction: 0.005
+  sweep_range:
+  - -3.0
+  - 3.0
