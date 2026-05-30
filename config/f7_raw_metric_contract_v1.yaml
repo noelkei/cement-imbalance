@@ -1,0 +1,69 @@
+raw_metric_contract:
+  contract_id: "f7_raw_metric_contract_v1"
+  contract_version: 1
+  raw_metric_contract_id: "f7_raw_metric_contract_v1"
+  campaign_anchor_metric_id: "raw_real.macro.rrmse"
+  anchor_metric_role: "default_ranking_and_reading_metric"
+  anchor_metric_note: "No actua como unica metrica soberana; sirve como ancla por defecto para ranking, tablas y lectura rapida."
+  campaign_validity_mode: "run_mode_dependent"
+
+  value_space_policy:
+    campaign_comparison_space: "raw"
+    transformed_space_metrics_allowed: true
+    transformed_space_metrics_can_govern_campaign_comparison: false
+    raw_inversion_required_for_campaign_validity: true
+
+  required_splits_by_run_mode:
+    selection_run:
+      - "train"
+      - "val"
+    holdout_run:
+      - "train"
+      - "val"
+      - "test"
+  run_mode_resolution_rule:
+    field: "test_enabled"
+    if_true: "holdout_run"
+    if_false: "selection_run"
+
+  required_metric_scopes:
+    - "overall"
+    - "macro"
+    - "per_class"
+
+  required_metric_names:
+    - "r2"
+    - "mse"
+    - "rmse"
+    - "rrmse"
+    - "mape"
+
+  required_metric_package_note: "Toda run campaign-valid de MLP o XGBoost debe cerrar con este paquete completo de metricas en raw space."
+
+  family_comparability_policy:
+    mlp_vs_xgb_same_surface_required: true
+    note: "MLP y XGBoost deben compararse en la misma capa final de metricas raw, no en metricas nativas de entrenamiento."
+
+  raw_inversion_artifacts_required:
+    - "y_transform"
+    - "value_space"
+    - "target scaler artifact when applicable"
+
+  validity_rule:
+    campaign_valid_if:
+      - "raw inversion succeeds when y was transformed"
+      - "required raw metrics exist for the splits required by the resolved run mode"
+      - "required scopes overall, macro and per_class exist"
+    campaign_invalid_if:
+      - "raw inversion fails"
+      - "required raw metrics are missing"
+      - "value_space metadata is ambiguous"
+
+  analysis_policy:
+    single_metric_optimization_required: false
+    primary_analysis_may_use_multiple_metrics: true
+    recommended_primary_views:
+      - "raw_real.macro.r2"
+      - "raw_real.macro.rrmse"
+      - "raw_real.per_class.r2"
+      - "raw_real.per_class.rrmse"

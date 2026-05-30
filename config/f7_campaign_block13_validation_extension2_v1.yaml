@@ -1,0 +1,113 @@
+campaign_spec:
+  campaign_id: "f7_campaign_block13_validation_extension2_v1"
+  campaign_spec_id: "f7_campaign_block13_validation_extension2_spec_v1"
+  campaign_spec_version: 1
+  campaign_scope: "block13_runner_validation_primary_104"
+  campaign_kind: "extension"
+  extension_type: "seed_extension"
+  campaign_lineage_id: "f7_campaign_block13_validation_lineage_v1"
+  root_campaign_id: "f7_campaign_block13_validation_primary_v1"
+  parent_campaign_id: "f7_campaign_block13_validation_extension_v1"
+  pooling_group_id: "f7_campaign_block13_validation_lineage_v1"
+  eligible_for_pooled_seed_analysis: false
+  is_primary_analysis_campaign: false
+  meta_grammar_id: "f7_meta_grammar_v1"
+  seed_set_id: "f7_seed_panel_block13_validation_extension2_v1"
+  seed_panel_path: "config/f7_seed_panel_block13_validation_extension2_v1.yaml"
+  run_mode_policy: "holdout_enabled_block13_validation"
+  run_mode: "holdout_run"
+  allow_test_holdout: true
+  test_enabled: true
+
+  required_global_contracts:
+    raw_metric_contract_id: "f7_raw_metric_contract_v1"
+    artifact_policy_id: "f7_artifact_persistence_contract_v1"
+
+  canonical_sources:
+    dataset_inventory_path: "data/sets/official/init_temporal_processed_v1/meta/f7_canonical_materialized_inventory_v1.csv"
+
+  outputs:
+    dataset_candidate_inventory_path: "outputs/reports/f7_campaign_block13_validation_extension2_v1/f7_campaign_block13_validation_extension2_dataset_candidates_v1.csv"
+    run_spec_inventory_path: "outputs/reports/f7_campaign_block13_validation_extension2_v1/f7_campaign_block13_validation_extension2_run_specs_v1.csv"
+    trial_inventory_path: "outputs/reports/f7_campaign_block13_validation_extension2_v1/f7_campaign_block13_validation_extension2_trials_v1.csv"
+    expansion_manifest_path: "outputs/reports/f7_campaign_block13_validation_extension2_v1/f7_campaign_block13_validation_extension2_expansion_manifest_v1.json"
+
+  expected_counts:
+    dataset_candidates:
+      mlp: 8
+      xgboost: 4
+      total: 12
+    run_specs:
+      mlp: 6
+      xgboost: 1
+      total: 7
+    trials:
+      mlp: 48
+      xgboost: 4
+      total: 52
+
+  mlp:
+    enabled: true
+    model_family: "mlp"
+    dataset_inventory_source: "data/sets/official/init_temporal_processed_v1/meta/f7_canonical_materialized_inventory_v1.csv"
+    dataset_filter:
+      model_family_scope: "mlp"
+      dataset_role: "derived_modeling_bundle"
+    include_dataset_candidate_ids:
+      - "mlp__x-candidate1__y-minmax__syn-none"
+      - "mlp__x-standard__y-minmax__syn-none"
+      - "mlp__x-candidate1__y-minmax__syn-kmeans-smote"
+      - "mlp__x-standard__y-minmax__syn-kmeans-smote"
+      - "mlp__x-candidate1__y-minmax__syn-flowgen-official"
+      - "mlp__x-standard__y-minmax__syn-flowgen-official"
+      - "mlp__x-candidate1__y-minmax__syn-flowgen-train-only"
+      - "mlp__x-standard__y-minmax__syn-flowgen-train-only"
+    mlp_base_config_id: "f7_mlp_base_v1"
+    objective_metric_id: "raw_real.macro.rrmse"
+    axes:
+      batch_policy: ["plain", "imbalance_aware"]
+      cycling_policy: ["no_cycling", "cycling"]
+      loss_policy: ["overall_rmse", "per_class_equal_rmse", "per_class_equal_rrmse"]
+      allow_synth: [true]
+    training_behavior_families:
+      - family_id: "plain"
+        batch_policy: "plain"
+        cycling_policy: "no_cycling"
+        dataloader_mode: "baseline"
+        cycle_reals: false
+      - family_id: "imbalance_aware"
+        batch_policy: "imbalance_aware"
+        cycling_policy: "cycling"
+        dataloader_mode: "balanced"
+        cycle_reals: true
+    compatibility_policy:
+      run_spec_expansion_mode: "paired_training_families_x_loss_policy"
+    contracts:
+      mlp_interpretability_contract_id: "f7_mlp_interpretability_contract_v1"
+    interpretability_layers:
+      native: "perturbation"
+      bridge: "perturbation"
+
+  xgboost:
+    enabled: true
+    model_family: "xgboost"
+    dataset_inventory_source: "data/sets/official/init_temporal_processed_v1/meta/f7_canonical_materialized_inventory_v1.csv"
+    dataset_filter:
+      model_family_scope: "xgboost"
+      dataset_role: "derived_modeling_bundle"
+    include_dataset_candidate_ids:
+      - "xgb__x-raw-base-v1__y-raw__syn-none"
+      - "xgb__x-raw-base-v1__y-raw__syn-kmeans-smote"
+      - "xgb__x-raw-base-v1__y-raw__syn-flowgen-official"
+      - "xgb__x-raw-base-v1__y-raw__syn-flowgen-train-only"
+    xgb_base_config_id: "f7_xgb_base_v1"
+    objective_metric_id: "raw_real.macro.rrmse"
+    run_spec_policy:
+      expansion_mode: "single_canonical_run_spec"
+    contracts:
+      xgb_interpretability_contract_id: "f7_xgb_interpretability_contract_v1"
+    interpretability_layers:
+      native: "shap"
+      bridge: "perturbation"
+    feature_surface_policy:
+      include_type_onehot: true

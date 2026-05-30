@@ -1,0 +1,119 @@
+meta_grammar:
+  grammar_id: "f7_meta_grammar_v1"
+  grammar_version: 1
+  campaign_id: "f7_campaign_v1"
+  campaign_scope: "full_f7_17400"
+  campaign_scope_note: "Campaign-wide identity for the full F7 run plan."
+
+  id_policy:
+    style: "semantic_human_readable"
+    ascii_only: true
+    stable_delimiter: "__"
+    persist_derived_ids: true
+
+  dataset_candidate_id:
+    role: "stable identity of a materialized campaign dataset candidate"
+    canonical_source: "data/sets/official/init_temporal_processed_v1/meta/f7_canonical_materialized_inventory_v1.csv"
+    derivation_policy: "copied verbatim from canonical 4B inventory; never reconstructed from ad hoc runner naming"
+    persistence_locations:
+      - "dataset inventory"
+      - "dataset manifest"
+      - "campaign spec"
+      - "run manifest"
+      - "results tables"
+
+  run_spec_id:
+    role: "stable identity of a training/comparison regime excluding seed"
+    seed_included: false
+    persistence_locations:
+      - "campaign spec"
+      - "run manifest"
+      - "results tables"
+    families:
+      mlp:
+        template: "runspec__mlp__{mlp_base_config_id}__{batch_policy}__{cycling_policy}__{loss_policy}__allow_synth-{allow_synth}"
+        required_fields:
+          - "mlp_base_config_id"
+          - "batch_policy"
+          - "cycling_policy"
+          - "loss_policy"
+          - "allow_synth"
+      xgboost:
+        template: "runspec__xgb__{xgb_base_config_id}"
+        required_fields:
+          - "xgb_base_config_id"
+
+  trial_id:
+    role: "stable identity of one concrete replicated run"
+    derivable: true
+    persisted_explicitly: true
+    template: "trial__{campaign_id}__{dataset_candidate_id}__{run_spec_id}__seed-{seed}"
+    persistence_locations:
+      - "run manifest"
+      - "results tables"
+      - "aggregated outputs when useful"
+
+  comparison_group_id:
+    role: "operational/fairness comparison group"
+    semantics: "Groups runs that belong to one explicitly defended comparison on the same dataset candidate."
+    cross_family_allowed: true
+    template: "cmp__{dataset_candidate_id}__{contrast_id}"
+    persistence_locations:
+      - "campaign spec"
+      - "run manifest"
+      - "results tables"
+    note: "May intentionally cross model families, for example MLP vs XGBoost on the same dataset candidate, when the contrast is explicit."
+
+  statistical_family_id:
+    role: "narrow analysis-specific family for statistical aggregation"
+    semantics: "Strict grouping for one declared analysis lens, not a broad intrinsic property of a run."
+    template: "statfam__{analysis_spec_id}__{dataset_candidate_id}__{contrast_id}"
+    persistence_locations:
+      - "campaign spec when the primary family is declared"
+      - "analysis spec"
+      - "aggregated outputs"
+    note: "Multiple statistical_family_id values may be derived over the same underlying runs for marginal effects and synergy analyses. Concrete families are frozen later in the analysis-grammar block."
+
+  seed_replication:
+    required_fields:
+      - "seed"
+      - "seed_set_id"
+      - "replication_index"
+    canonical_seed_panel_id: "f7_seed_panel_v1"
+    note: "The campaign seed is a shared replica axis across model families even if internal binding differs by family."
+
+  field_placement:
+    dataset_manifest:
+      required:
+        - "dataset_candidate_id"
+    campaign_spec:
+      required:
+        - "campaign_id"
+        - "dataset_candidate_id"
+        - "run_spec_id"
+        - "comparison_group_id"
+        - "seed_set_id"
+      optional:
+        - "statistical_family_id"
+    run_manifest:
+      required:
+        - "campaign_id"
+        - "dataset_candidate_id"
+        - "run_spec_id"
+        - "trial_id"
+        - "comparison_group_id"
+        - "seed"
+        - "seed_set_id"
+      optional:
+        - "statistical_family_id"
+    results_tables:
+      required:
+        - "campaign_id"
+        - "dataset_candidate_id"
+        - "run_spec_id"
+        - "trial_id"
+        - "comparison_group_id"
+        - "seed"
+        - "seed_set_id"
+      optional:
+        - "statistical_family_id"

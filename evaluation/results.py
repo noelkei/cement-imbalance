@@ -8,6 +8,8 @@ from typing import Any, Mapping, Optional
 import pandas as pd
 import yaml
 
+from evaluation.meta_context import derive_meta_context, json_blob
+
 from data.sets import DEFAULT_OFFICIAL_DATASET_NAME, official_raw_bundle_manifest_path
 
 
@@ -60,12 +62,6 @@ def _stable_hash(payload: Any) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
-def _json_blob(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    return json.dumps(value, sort_keys=True, ensure_ascii=True, default=_json_default)
-
-
 def _strip_seed_keys(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -105,12 +101,24 @@ def build_run_context(
     contract_id: str | None = None,
     comparison_group_id: str | None = None,
     seed_set_id: str | None = None,
+    seed_panel_path: str | Path | None = None,
     base_config_id: str | None = None,
     objective_metric_id: str | None = None,
     dataset_level_axes: Optional[Mapping[str, Any]] = None,
     run_level_axes: Optional[Mapping[str, Any]] = None,
     monitoring: Optional[Mapping[str, Any]] = None,
+    training_summary: Optional[Mapping[str, Any]] = None,
     test_enabled: bool | None = None,
+    campaign_id: str | None = None,
+    dataset_candidate_id: str | None = None,
+    run_spec_id: str | None = None,
+    trial_id: str | None = None,
+    contrast_id: str | None = None,
+    raw_metric_contract_id: str | None = None,
+    raw_metric_contract_validation: Optional[Mapping[str, Any]] = None,
+    run_mode: str | None = None,
+    campaign_valid: bool | None = None,
+    raw_inversion_status: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     config_dict = config or _load_config(config_path)
     config_path_str = _as_path_str(config_path)
@@ -127,6 +135,7 @@ def build_run_context(
     resolved_dataset_axes = dict(dataset_level_axes or dataset_manifest.get("dataset_level_axes") or {})
     resolved_run_axes = dict(run_level_axes or {})
     resolved_monitoring = dict(monitoring or {})
+    resolved_training_summary = dict(training_summary or {})
     resolved_comparison_group_id = comparison_group_id
     if (
         resolved_comparison_group_id is None
@@ -148,6 +157,23 @@ def build_run_context(
     else:
         config_sha256 = _stable_hash(config_dict)
 
+    meta_context = derive_meta_context(
+        model_family=model_family,
+        dataset_manifest_path=dataset_manifest_str,
+        base_config_id=base_config_id,
+        run_level_axes=resolved_run_axes,
+        seed=seed,
+        seed_set_id=seed_set_id,
+        seed_panel_path=seed_panel_path,
+        dataset_candidate_id=dataset_candidate_id,
+        comparison_group_id=resolved_comparison_group_id,
+        campaign_id=campaign_id,
+        run_spec_id=run_spec_id,
+        trial_id=trial_id,
+        contrast_id=contrast_id,
+    )
+    resolved_comparison_group_id = meta_context["comparison_group_id"]
+
     fingerprint_payload = {
         "model_family": model_family,
         "dataset_name": resolved_dataset_name,
@@ -157,7 +183,12 @@ def build_run_context(
         "upstream_variant_fingerprint": upstream_variant_fingerprint,
         "contract_id": resolved_contract_id,
         "comparison_group_id": resolved_comparison_group_id,
+        "campaign_id": meta_context.get("campaign_id"),
+        "dataset_candidate_id": meta_context.get("dataset_candidate_id"),
+        "run_spec_id": meta_context.get("run_spec_id"),
+        "trial_id": meta_context.get("trial_id"),
         "seed_set_id": seed_set_id,
+        "seed_panel_path": meta_context.get("seed_panel_path"),
         "base_config_id": base_config_id,
         "objective_metric_id": objective_metric_id,
         "dataset_level_axes": resolved_dataset_axes,
@@ -176,7 +207,14 @@ def build_run_context(
         "model_family": model_family,
         "contract_id": resolved_contract_id,
         "comparison_group_id": resolved_comparison_group_id,
+        "campaign_id": meta_context.get("campaign_id"),
+        "dataset_candidate_id": meta_context.get("dataset_candidate_id"),
+        "run_spec_id": meta_context.get("run_spec_id"),
+        "trial_id": meta_context.get("trial_id"),
+        "replication_index": meta_context.get("replication_index"),
+        "seed_panel_version": meta_context.get("seed_panel_version"),
         "seed_set_id": seed_set_id,
+        "seed_panel_path": meta_context.get("seed_panel_path"),
         "base_config_id": base_config_id,
         "objective_metric_id": objective_metric_id,
         "upstream_variant_fingerprint": upstream_variant_fingerprint,
@@ -185,6 +223,7 @@ def build_run_context(
         "dataset_level_axes": resolved_dataset_axes or None,
         "run_level_axes": resolved_run_axes or None,
         "monitoring": resolved_monitoring or None,
+        "training_summary": resolved_training_summary or None,
         "split_id": resolved_split_id,
         "split_manifest_path": split_manifest_str,
         "seed": None if seed is None else int(seed),
@@ -192,6 +231,11 @@ def build_run_context(
         "config_sha256": config_sha256,
         "test_enabled": None if test_enabled is None else bool(test_enabled),
         "split_role_map": dict(split_role_map or DEFAULT_SPLIT_ROLE_MAP),
+        "raw_metric_contract_id": raw_metric_contract_id,
+        "raw_metric_contract_validation": dict(raw_metric_contract_validation or {}),
+        "run_mode": run_mode,
+        "campaign_valid": None if campaign_valid is None else bool(campaign_valid),
+        "raw_inversion_status": dict(raw_inversion_status or {}),
     }
 
 
@@ -215,20 +259,30 @@ def _base_row(
         "model_family": context["model_family"],
         "contract_id": context.get("contract_id"),
         "comparison_group_id": context.get("comparison_group_id"),
+        "campaign_id": context.get("campaign_id"),
+        "dataset_candidate_id": context.get("dataset_candidate_id"),
+        "run_spec_id": context.get("run_spec_id"),
+        "trial_id": context.get("trial_id"),
+        "replication_index": context.get("replication_index"),
+        "seed_panel_version": context.get("seed_panel_version"),
         "seed_set_id": context.get("seed_set_id"),
+        "seed_panel_path": context.get("seed_panel_path"),
         "base_config_id": context.get("base_config_id"),
         "objective_metric_id": context.get("objective_metric_id"),
         "upstream_variant_fingerprint": context.get("upstream_variant_fingerprint"),
         "dataset_name": context.get("dataset_name"),
         "dataset_manifest_path": context.get("dataset_manifest_path"),
-        "dataset_level_axes": _json_blob(context.get("dataset_level_axes")),
-        "run_level_axes": _json_blob(context.get("run_level_axes")),
+        "dataset_level_axes": json_blob(context.get("dataset_level_axes")),
+        "run_level_axes": json_blob(context.get("run_level_axes")),
         "split_id": context.get("split_id"),
         "split_manifest_path": context.get("split_manifest_path"),
         "seed": context.get("seed"),
         "config_path": context.get("config_path"),
         "config_sha256": context.get("config_sha256"),
         "test_enabled": context.get("test_enabled"),
+        "raw_metric_contract_id": context.get("raw_metric_contract_id"),
+        "run_mode": context.get("run_mode"),
+        "campaign_valid": context.get("campaign_valid"),
         "split": split,
         "split_role": context.get("split_role_map", DEFAULT_SPLIT_ROLE_MAP).get(split, split),
         "metric_group": metric_group,
@@ -600,7 +654,7 @@ def flatten_run_results(results: Mapping[str, Any], context: Mapping[str, Any]) 
     rows: list[dict[str, Any]] = []
     family = str(context["model_family"]).lower()
 
-    if family == "mlp":
+    if family in {"mlp", "xgboost"}:
         for split in ("train", "val", "test"):
             metrics = results.get(split)
             if isinstance(metrics, Mapping):
@@ -632,13 +686,21 @@ def save_canonical_run_artifacts(
     context: Mapping[str, Any],
     out_dir: str | Path,
     stem: str,
+    filename_policy: str = "versioned_aliases",
+    manifest_extra_fields: Mapping[str, Any] | None = None,
 ) -> tuple[Path, Path]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_long = flatten_run_results(results, context)
-    manifest_path = out_dir / f"{stem}_run_manifest.json"
-    metrics_path = out_dir / f"{stem}_metrics_long.csv"
+    if str(filename_policy) == "stable_single_copy":
+        manifest_path = out_dir / "run_manifest.json"
+        metrics_path = out_dir / "metrics_long.csv"
+    elif str(filename_policy) == "versioned_aliases":
+        manifest_path = out_dir / f"{stem}_run_manifest.json"
+        metrics_path = out_dir / f"{stem}_metrics_long.csv"
+    else:
+        raise ValueError(f"Unsupported filename_policy '{filename_policy}'.")
 
     manifest = {
         "run_id": context["run_id"],
@@ -646,7 +708,14 @@ def save_canonical_run_artifacts(
         "model_family": context["model_family"],
         "contract_id": context.get("contract_id"),
         "comparison_group_id": context.get("comparison_group_id"),
+        "campaign_id": context.get("campaign_id"),
+        "dataset_candidate_id": context.get("dataset_candidate_id"),
+        "run_spec_id": context.get("run_spec_id"),
+        "trial_id": context.get("trial_id"),
+        "replication_index": context.get("replication_index"),
+        "seed_panel_version": context.get("seed_panel_version"),
         "seed_set_id": context.get("seed_set_id"),
+        "seed_panel_path": context.get("seed_panel_path"),
         "base_config_id": context.get("base_config_id"),
         "objective_metric_id": context.get("objective_metric_id"),
         "upstream_variant_fingerprint": context.get("upstream_variant_fingerprint"),
@@ -655,15 +724,23 @@ def save_canonical_run_artifacts(
         "dataset_level_axes": context.get("dataset_level_axes"),
         "run_level_axes": context.get("run_level_axes"),
         "monitoring": context.get("monitoring"),
+        "training_summary": context.get("training_summary"),
         "split_id": context.get("split_id"),
         "split_manifest_path": context.get("split_manifest_path"),
         "seed": context.get("seed"),
         "config_path": context.get("config_path"),
         "config_sha256": context.get("config_sha256"),
         "test_enabled": context.get("test_enabled"),
+        "raw_metric_contract_id": context.get("raw_metric_contract_id"),
+        "raw_metric_contract_validation": context.get("raw_metric_contract_validation"),
+        "run_mode": context.get("run_mode"),
+        "campaign_valid": context.get("campaign_valid"),
+        "raw_inversion_status": context.get("raw_inversion_status"),
         "split_role_map": context.get("split_role_map"),
         "metrics_long_path": str(metrics_path),
     }
+    if manifest_extra_fields:
+        manifest.update(json.loads(json.dumps(manifest_extra_fields, default=_json_default)))
 
     with open(manifest_path, "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, sort_keys=True)

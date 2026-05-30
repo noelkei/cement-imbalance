@@ -1,0 +1,17 @@
+factor_parser_contract:
+  contract_id: "f7_factor_parser_contract_v1"
+  contract_version: 1
+  dataset_axes_source: "dataset_level_axes"
+  run_axes_source: "run_level_axes"
+  parsed_fields:
+    - "x_transform"
+    - "y_transform"
+    - "synthetic_policy"
+    - "run_policy"
+    - "flowpre_usage"
+    - "flowgen_usage"
+  rules:
+    flowpre_usage:
+      x_transform_prefix: "flowpre_"
+    flowgen_usage:
+      synthetic_policy_prefix: "flowgen_"

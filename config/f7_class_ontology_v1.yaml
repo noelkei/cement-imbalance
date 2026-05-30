@@ -1,0 +1,18 @@
+class_ontology:
+  contract_id: "f7_class_ontology_v1"
+  contract_version: 1
+  target_name: "init"
+  condition_column: "type"
+  classes:
+    - class_id: 0
+      class_label_public: "class_0"
+      class_order: 1
+    - class_id: 1
+      class_label_public: "class_1"
+      class_order: 2
+    - class_id: 2
+      class_label_public: "class_2"
+      class_order: 3
+  worst_class_policy:
+    scope: "per_class"
+    ordering_metric_role: "max_error"

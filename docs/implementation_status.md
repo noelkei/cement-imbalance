@@ -20,6 +20,22 @@ El proyecto ya ha cerrado:
 - la semantica sensible del arranque de preprocess ya no debe vivir hardcodeada en `data/cleaning.py`; ahora pasa por `config/cleaning_contract.yaml` + `config/local/cleaning_contract.yaml` para separar logica publica de detalles operativos privados del raw.
 - `data/raw/`, `data/processed/`, `data/cleaned/`, `data/splits/`, `data/sets/` y los artefactos generados bajo `outputs/` deben tratarse como superficies locales para git/publicacion aunque sigan siendo valiosas en local.
 
+## Snapshot publico del repo
+
+- tras el update publico de `main` de mayo de 2026, GitHub ya refleja una superficie bastante alineada con el canon actual del proyecto;
+- esa superficie publicada incluye:
+  - docs canónicos actualizados;
+  - capa tracked ligera de finalists/winners bajo `config/finalists*` y `docs/finalists*`;
+  - playbook de backup/restore;
+  - `cleaning_contract` como contract mixto public-safe;
+  - contrato experimental base, capa canónica de evaluacion y soporte inicial para `kmeans_smote`;
+- siguen fuera del repo publico por diseño:
+  - `data/raw/`;
+  - `config/local/`;
+  - `outputs/` y artefactos pesados o promovidos locales;
+  - notebooks operativas y material de drafting local;
+- por tanto, GitHub ya funciona como backup serio del canon publico y de la metadata ligera de cierre, pero no sustituye el backup local completo necesario para reproduccion material total del proyecto.
+
 ## Estado metodologico actual
 
 - el split oficial canonico es `init_temporal_processed_v1`
@@ -247,22 +263,26 @@ Rutas canonicas de split:
 - definir la shortlist final de combinaciones/datasets para `F7`
 - ejecutar campañas comparables con `MLP` sobre esa shortlist
 - decidir si el finalista local `train_only` entra en la comparacion downstream final
+- ejecutar la capa analítica final sobre la campaña grande ya bajo la gramática congelada del bloque `14`
 - rehacer notebooks finales
 - preparar repo publico limpio
 
 Nota de fase:
 
-- `F7` sigue pendiente y no se congela en esta iteracion documental.
-- antes de planificar `F7`, el repo deja fijadas la frontera NDA, la superficie visible y los artefactos de señal/trazabilidad.
+- `F7` sigue pendiente como comparacion final y shortlist del TFG.
+- pero ya no queda abierta la gramática estadística principal:
+  - el bloque `14` queda congelado en:
+    - [docs/f7_block_14_analysis_grammar_rationale.md](f7_block_14_analysis_grammar_rationale.md)
+    - [docs/f7_statistical_analysis_plan_structured.md](f7_statistical_analysis_plan_structured.md)
+    - [docs/f7_statistical_analysis_spec.yaml](f7_statistical_analysis_spec.yaml)
+- el trabajo pendiente ya no es decidir “cómo” leer estadísticamente la campaña, sino ejecutar y materializar esa lectura sobre la campaña final.
+- el benchmark real de coste también queda ya observado y documentado a partir de la cadena canónica pequeña, por lo que el siguiente frente pasa a ser el preflight final de lanzamiento.
+- el preflight final de lanzamiento ya queda satisfecho con una `readiness pass` canónica `go/no-go` sobre `primary + 3 extensions`.
 
 ## Open decisions reales
 
 - shortlist final de combinaciones a comparar con `MLP`
 - inclusion o no del finalista local `train_only` de `FlowGen` dentro de `F7`
-- inclusion o no de `XGBoost`
-- inclusion o no de `SMOTE` / `KMeans-SMOTE`
-- `closure seed set` final
-- `MLP base config` final congelado
 - que datasets derivados y sintéticos se promocionaran finalmente a artefactos oficiales
 
 ## Siguiente paso recomendado
@@ -279,7 +299,7 @@ Cierre downstream tras el cierre final de `FlowGen official` y de la rama local 
 - tratar `flowgen_tpv1_c2_train_s01_e38_softclip_seed2468_v2` solo como ancla historica pre-reseed
 - tomar `flowgen_tpv1_c2_train_e03_seed2468_v1` como winner/promoted finalist vigente de `FlowGen`
 - decidir explicitamente si `flowgen_trainonly_tpv1_ct1_reseedfinal_r3a2_t06_clip125_seed15427_v1` entra como candidato experimental de `F7`
-- ejecutar campañas comparables con `MLP` usando `config/mlp_closure_base_v1.yaml`, `closure_5x_v1`, seleccion en `val` y `test` bloqueado por defecto cuando corresponda
+- ejecutar la campaña grande real y después materializar la capa analítica final ya bajo la gramática congelada del bloque `14`
 
 ## Roadmap ahead
 

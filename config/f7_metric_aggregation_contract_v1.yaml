@@ -1,0 +1,22 @@
+metric_aggregation_contract:
+  contract_id: "f7_metric_aggregation_contract_v1"
+  contract_version: 1
+  aggregation_semantics:
+    overall:
+      description: "Sample-weighted aggregation over the split evaluation population."
+      weighting: "sample_weighted"
+    macro:
+      description: "Unweighted class-average aggregation."
+      weighting: "class_unweighted"
+    per_class:
+      description: "Metric computed independently for each class."
+      weighting: "not_applicable"
+    worst_class:
+      description: "Worst per-class value under the optimization direction of the metric."
+      weighting: "derived_from_per_class"
+  optimization_direction:
+    mse: "minimize"
+    rmse: "minimize"
+    rrmse: "minimize"
+    mape: "minimize"
+    r2: "maximize"

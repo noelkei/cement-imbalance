@@ -1,0 +1,28 @@
+metric_grammar:
+  contract_id: "f7_metric_grammar_v1"
+  contract_version: 1
+  required_splits:
+    selection_run:
+      - "train"
+      - "val"
+    holdout_run:
+      - "train"
+      - "val"
+      - "test"
+  metric_groups:
+    predictive:
+      names:
+        - "mse"
+        - "rmse"
+        - "rrmse"
+        - "r2"
+        - "mape"
+  metric_scopes:
+    - "overall"
+    - "macro"
+    - "per_class"
+    - "worst_class"
+  value_spaces:
+    - "raw_real"
+    - "native"
+  primary_anchor_metric_id: "raw_real.macro.rrmse"

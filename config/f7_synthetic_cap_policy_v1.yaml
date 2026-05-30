@@ -1,0 +1,22 @@
+policy:
+  policy_id: "f7_synthetic_cap_policy_v1"
+  split_id: "init_temporal_processed_v1"
+  condition_col: "type"
+  synth_flag_col: "is_synth"
+  majority_reference: "official_train_real_counts"
+  majority_tie_policy: "no_synth_for_tied_majority_classes"
+  majority_synth_policy: "forbid"
+  regeneration_policy: "rematerialize_from_scratch"
+  materialization_policy: "generate_to_target_not_generate_then_trim"
+
+constraints:
+  max_fraction_of_real_per_minority_class: 0.5
+  forbid_minorities_from_exceeding_majority_real_count: true
+  require_zero_synth_in_majority_classes: true
+
+manifest_requirements:
+  require_per_class_n_real: true
+  require_per_class_n_synth: true
+  require_per_class_n_final: true
+  require_per_class_synth_fraction_final: true
+  require_central_validation_summary: true

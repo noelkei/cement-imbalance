@@ -1,0 +1,504 @@
+study:
+  study_id: "f7_mlp_baseline_revalidation_v2"
+  description: "Segunda y ultima revalidacion 3x40 del baseline MLP para F7"
+
+dataset:
+  scaled_set_name: "df_scaled_xstandard_yminmax"
+  dataset_name: "dataset__x-standard__y-minmax__syn-none__v1"
+  dataset_manifest_path: "data/sets/official/init_temporal_processed_v1/scaled/df_scaled_xstandard_yminmax/meta/manifest.json"
+  split_id: "init_temporal_processed_v1"
+  condition_col: "type"
+  dataset_level_axes:
+    x_transform: "standard"
+    y_transform: "minmax"
+    synthetic_policy: "none"
+
+protocol:
+  base_config_path: "config/mlp_closure_base_v1.yaml"
+  objective_metric_id: "raw_real.macro.rrmse"
+  objective_metric_path: "macro.rrmse"
+  fixed_overrides:
+    contract.seed_set_id: "f7_mlp_reval4_v1"
+    contract.objective_metric_id: "raw_real.macro.rrmse"
+    training.batch_size: 198
+    training.num_epochs: 300
+    training.learning_rate: 0.0001
+    training.loss_reduction: "overall"
+    training.regression_group_metric: "rmse"
+    training.dataloader_mode: "baseline"
+    training.cycle_reals: false
+    training.allow_synth: true
+    training.save_model: false
+    training.save_states: false
+    training.save_results: true
+    training.log_training: false
+    interpretability.compute_shap: false
+    interpretability.save_influence: false
+  family_keys:
+    - "training.batch_size"
+    - "training.num_epochs"
+    - "training.learning_rate"
+    - "training.early_stopping_patience"
+    - "training.lr_decay_patience"
+    - "training.lr_scheduler"
+    - "model.hidden_dim"
+    - "model.num_layers"
+    - "model.embedding_dim"
+  run_level_keys:
+    - "training.loss_reduction"
+    - "training.regression_group_metric"
+    - "training.dataloader_mode"
+    - "training.cycle_reals"
+  seeds:
+    seed_set_id: "f7_mlp_reval4_v1"
+    values: [1234, 2345, 3456]
+  test_policy:
+    use_test_for_selection: false
+    winner_check: "single_winner_only"
+
+variants:
+  - cfg_id: "base_hd128_l3"
+    rationale: "Ancla estructural sobre batch 198 y 300 epochs."
+    params:
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd192_l3"
+    rationale: "Mas anchura manteniendo tres capas."
+    params:
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l3"
+    rationale: "Anchura media-alta con tres capas."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l3"
+    rationale: "Subida agresiva de anchura manteniendo profundidad baja."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd512_l3"
+    rationale: "Anchura maxima con tres capas para detectar saturacion temprana."
+    params:
+      model.hidden_dim: 512
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd128_l4"
+    rationale: "Una capa extra sin aumentar anchura."
+    params:
+      model.hidden_dim: 128
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd192_l4"
+    rationale: "Profundidad 4 con anchura contenida."
+    params:
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l4"
+    rationale: "Candidata natural si compensa subir un poco capacidad total."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l4"
+    rationale: "Mayor anchura con profundidad intermedia."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd512_l4"
+    rationale: "Capacidad alta para ver si cuatro capas soportan anchura maxima."
+    params:
+      model.hidden_dim: 512
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd128_l6"
+    rationale: "Profundidad 6 con anchura minima para medir coste de profundidad pura."
+    params:
+      model.hidden_dim: 128
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd192_l6"
+    rationale: "Profundidad alta con anchura moderada."
+    params:
+      model.hidden_dim: 192
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l6"
+    rationale: "Candidata fuerte de mayor profundidad."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l6"
+    rationale: "Capacidad alta para comprobar si el salto de seis capas paga de verdad."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd512_l6"
+    rationale: "Configuracion estructural extrema pero aun razonable para esta ultima validacion."
+    params:
+      model.hidden_dim: 512
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd192_l8"
+    rationale: "Profundidad maxima con anchura contenida para detectar si el cuello es depth-only."
+    params:
+      model.hidden_dim: 192
+      model.num_layers: 8
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l8"
+    rationale: "Profundidad maxima con anchura media-alta."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 8
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l8"
+    rationale: "Prueba exigente de ocho capas con anchura alta."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 8
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l6_lr5e5_pat30_lrp15"
+    rationale: "Misma familia de profundidad alta con lr mas bajo y paciencia mayor para ver si el problema es de optimizacion."
+    params:
+      training.learning_rate: 0.00005
+      training.early_stopping_patience: 30
+      training.lr_decay_patience: 15
+      model.hidden_dim: 256
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l6_lr5e5_pat30_lrp15"
+    rationale: "Chequeo análogo sobre una familia aun mas ancha."
+    params:
+      training.learning_rate: 0.00005
+      training.early_stopping_patience: 30
+      training.lr_decay_patience: 15
+      model.hidden_dim: 384
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd192_l3"
+    rationale: "per_class_equal+rmse sobre familia ligera en regimen plain."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd192_l3"
+    rationale: "per_class_equal+rmse sobre la misma familia en imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd256_l4"
+    rationale: "per_class_equal+rmse sobre una familia intermedia fuerte en plain."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd256_l4"
+    rationale: "Misma familia con regime imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd384_l4"
+    rationale: "per_class_equal+rmse sobre anchura alta con profundidad 4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd384_l4"
+    rationale: "Misma familia con regimen imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd256_l6"
+    rationale: "per_class_equal+rmse sobre familia profunda candidata."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 256
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd256_l6"
+    rationale: "Misma familia profunda en imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 256
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd384_l6"
+    rationale: "per_class_equal+rmse sobre familia profunda y ancha."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 384
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd384_l6"
+    rationale: "Misma familia profunda y ancha en imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 384
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd192_l3"
+    rationale: "per_class_equal+rrmse sobre familia ligera en regimen plain."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd192_l3"
+    rationale: "per_class_equal+rrmse sobre la misma familia en imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd256_l4"
+    rationale: "per_class_equal+rrmse sobre familia intermedia fuerte en plain."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd256_l4"
+    rationale: "Misma familia con regime imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd384_l4"
+    rationale: "per_class_equal+rrmse sobre anchura alta con profundidad 4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd384_l4"
+    rationale: "Misma familia con regimen imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd256_l6"
+    rationale: "per_class_equal+rrmse sobre familia profunda candidata."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 256
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd256_l6"
+    rationale: "Misma familia profunda en imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 256
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd384_l6"
+    rationale: "per_class_equal+rrmse sobre familia profunda y ancha."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 384
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd384_l6"
+    rationale: "Misma familia profunda y ancha en imbalance-aware."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 384
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true

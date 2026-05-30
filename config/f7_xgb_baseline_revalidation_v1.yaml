@@ -1,0 +1,162 @@
+study:
+  study_id: "f7_xgb_baseline_revalidation_v1"
+  description: "Mini-revalidacion 3x20 del baseline XGBoost para F7"
+
+dataset:
+  dataset_name: "official_raw_xgb_base_v1"
+  split_mode: "official"
+  df_name: "df_input_v6"  # placeholder overridden by script to canonical official raw bundle name when needed
+  split_id: "init_temporal_processed_v1"
+  condition_col: "type"
+  target_col: "init"
+  representation:
+    x_transform: "raw"
+    y_transform: "raw"
+    synthetic_policy: "none"
+    feature_policy: "raw_numeric_plus_type_onehot"
+
+protocol:
+  objective_metric_id: "raw_real.macro.rrmse"
+  objective_metric_path: "macro.rrmse"
+  top_k_shap: 3
+  shap_sample_size: 128
+  base_config:
+    objective: "reg:squarederror"
+    n_estimators: 1200
+    learning_rate: 0.035
+    max_depth: 4
+    min_child_weight: 4
+    subsample: 0.85
+    colsample_bytree: 0.80
+    reg_alpha: 0.02
+    reg_lambda: 1.50
+    gamma: 0.0
+    tree_method: "hist"
+    max_bin: 256
+    eval_metric: "rmse"
+    early_stopping_rounds: 60
+  seeds:
+    seed_set_id: "f7_xgb_reval1_v1"
+    values: [1234, 2345, 3456]
+
+variants:
+  - cfg_id: "anchor_default"
+    rationale: "Ancla historica reutilizada como prior fuerte."
+    params: {}
+
+  - cfg_id: "lr2e2"
+    rationale: "Learning rate algo mas conservador con el mismo resto."
+    params:
+      learning_rate: 0.02
+
+  - cfg_id: "lr5e2"
+    rationale: "Learning rate algo mas agresivo para comprobar si converge mejor antes."
+    params:
+      learning_rate: 0.05
+
+  - cfg_id: "d3_mc4"
+    rationale: "Arboles mas someros para una baseline mas regularizada."
+    params:
+      max_depth: 3
+      min_child_weight: 4
+
+  - cfg_id: "d5_mc4"
+    rationale: "Mas profundidad manteniendo el control del hijo minimo."
+    params:
+      max_depth: 5
+      min_child_weight: 4
+
+  - cfg_id: "d6_mc6"
+    rationale: "Configuracion mas potente y regularizada a la vez."
+    params:
+      max_depth: 6
+      min_child_weight: 6
+
+  - cfg_id: "d4_mc2"
+    rationale: "Menos restriccion de min_child_weight para ver si el dataset tolera hojas mas finas."
+    params:
+      max_depth: 4
+      min_child_weight: 2
+
+  - cfg_id: "d4_mc8"
+    rationale: "Mas restriccion de min_child_weight para priorizar robustez."
+    params:
+      max_depth: 4
+      min_child_weight: 8
+
+  - cfg_id: "sub07_col07"
+    rationale: "Mas aleatorizacion en filas y columnas."
+    params:
+      subsample: 0.70
+      colsample_bytree: 0.70
+
+  - cfg_id: "sub10_col10"
+    rationale: "Menos aleatorizacion para comprobar si el dataset pide mas capacidad efectiva."
+    params:
+      subsample: 1.0
+      colsample_bytree: 1.0
+
+  - cfg_id: "reg_light"
+    rationale: "Regularizacion mas ligera."
+    params:
+      reg_alpha: 0.0
+      reg_lambda: 1.0
+
+  - cfg_id: "reg_strong"
+    rationale: "Regularizacion mas fuerte para revisar si el prior actual va algo suelto."
+    params:
+      reg_alpha: 0.10
+      reg_lambda: 3.0
+
+  - cfg_id: "n800_es40"
+    rationale: "Menos boosting rounds y early stopping mas rapido."
+    params:
+      n_estimators: 800
+      early_stopping_rounds: 40
+
+  - cfg_id: "n1600_es80"
+    rationale: "Mas boosting rounds y paciencia mayor para no sesgar contra configuraciones lentas."
+    params:
+      n_estimators: 1600
+      early_stopping_rounds: 80
+
+  - cfg_id: "d5_lr25e3"
+    rationale: "Profundidad 5 con learning rate algo mas bajo."
+    params:
+      max_depth: 5
+      learning_rate: 0.025
+
+  - cfg_id: "d5_lr5e2"
+    rationale: "Profundidad 5 con learning rate algo mas alto."
+    params:
+      max_depth: 5
+      learning_rate: 0.05
+
+  - cfg_id: "d3_lr5e2_sub10"
+    rationale: "Someros pero menos aleatorios para comprobar un baseline mas sesgado-bajo."
+    params:
+      max_depth: 3
+      learning_rate: 0.05
+      subsample: 1.0
+      colsample_bytree: 1.0
+
+  - cfg_id: "d4_gamma01"
+    rationale: "Pequeña penalizacion a splits marginales."
+    params:
+      max_depth: 4
+      gamma: 0.1
+
+  - cfg_id: "d5_mc8"
+    rationale: "Profundidad 5 con min_child_weight alto."
+    params:
+      max_depth: 5
+      min_child_weight: 8
+
+  - cfg_id: "d6_lr2e2_sub08_col08"
+    rationale: "Configuracion potente pero mas cauta en learning rate y muestreo."
+    params:
+      max_depth: 6
+      min_child_weight: 6
+      learning_rate: 0.02
+      subsample: 0.80
+      colsample_bytree: 0.80

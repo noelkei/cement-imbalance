@@ -11,6 +11,19 @@ from data.dataset_contract import (
     classify_supported_dataset_space,
     counts_from_source_manifest,
 )
+from data.f7_synthetic_cap_policy import (
+    F7SyntheticCapPolicy,
+    resolve_f7_synthetic_targets,
+    summarize_f7_synthetic_cap,
+)
+from data.f7_synthetic_guardrails import (
+    F7SyntheticAcceptanceEngine,
+    F7SyntheticGuardrailPolicy,
+    build_modeled_raw_cleaning_audit_view,
+    load_cleaning_audit_artifacts,
+    load_f7_synthetic_guardrail_policy,
+    resolve_retry_batch_size,
+)
 from data.kmeans_smote_joint import (
     augment_canonical_bundle_with_kmeans_smote,
     load_kmeans_smote_joint_config,
@@ -25,6 +38,8 @@ import joblib
 from sklearn.preprocessing import StandardScaler, RobustScaler, QuantileTransformer, MinMaxScaler
 
 from pathlib import Path
+from datetime import datetime, timezone
+import hashlib
 import json
 import shutil
 from typing import Any, Dict, List, Tuple, Optional, Mapping
@@ -36,9 +51,14 @@ _LEGACY_FLOWPRE_MODELS_DIR = Path(ROOT_PATH) / "outputs" / "models" / "flow_pre"
 _OFFICIAL_FLOWPRE_MODELS_DIR = _OFFICIAL_OUTPUTS_ROOT / "flow_pre"
 _LEGACY_FLOWGEN_MODELS_DIR = Path(ROOT_PATH) / "outputs" / "models" / "flowgen"
 _OFFICIAL_FLOWGEN_MODELS_DIR = _OFFICIAL_OUTPUTS_ROOT / "flowgen"
+_EXPERIMENTAL_TRAINONLY_FLOWGEN_DIR = _OFFICIAL_OUTPUTS_ROOT.parent / "experimental" / "train_only" / "flowgen"
+_OFFICIAL_FLOWGEN_POOL_ROOT_NAME = "synthetic_pools"
+_OFFICIAL_XGB_ROOT_NAME = "xgboost"
 DEFAULT_LEGACY_DATASET_NAME = "df_input"
 DEFAULT_OFFICIAL_DATASET_NAME = "df_input_cp_trainfit_overlap_cap1pct_holdoutflag_v1"
 FLOWGEN_WORK_BASE_IDS = {"candidate_1", "candidate_2"}
+_F7_SYNTH_CAP_POLICY = F7SyntheticCapPolicy()
+_F7_GUARDRAIL_POLICY = F7SyntheticGuardrailPolicy()
 
 
 def _official_raw_bundle_dir(
@@ -60,6 +80,18 @@ def _official_augmented_scaled_root(
     return _OFFICIAL_SETS_ROOT / split_id / "augmented_scaled"
 
 
+def _official_flowgen_pool_root(
+    split_id: str = DEFAULT_OFFICIAL_SPLIT_ID,
+) -> Path:
+    return _OFFICIAL_SETS_ROOT / split_id / _OFFICIAL_FLOWGEN_POOL_ROOT_NAME
+
+
+def _official_xgb_root(
+    split_id: str = DEFAULT_OFFICIAL_SPLIT_ID,
+) -> Path:
+    return _OFFICIAL_SETS_ROOT / split_id / _OFFICIAL_XGB_ROOT_NAME
+
+
 def _official_scaled_bundle_dir(
     storage_name: str,
     split_id: str = DEFAULT_OFFICIAL_SPLIT_ID,
@@ -79,6 +111,37 @@ def official_raw_bundle_manifest_path(
     dataset_name: str = DEFAULT_OFFICIAL_DATASET_NAME,
 ) -> Path:
     return _official_raw_bundle_dir(split_id=split_id, dataset_name=dataset_name) / "manifest.json"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stable_json_blob(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _stable_dataset_row_fingerprint(
+    *,
+    X_row: Mapping[str, Any],
+    y_row: Mapping[str, Any],
+) -> str:
+    return hashlib.sha256(
+        _stable_json_blob({"X": dict(X_row), "y": dict(y_row)}).encode("utf-8")
+    ).hexdigest()
+
+
+def _with_version_suffix(base_id: str, version: str = "v1") -> str:
+    suffix = f"__{version}"
+    return base_id if base_id.endswith(suffix) else f"{base_id}{suffix}"
 
 
 def _load_json_dict(path: str | Path | None) -> Optional[dict[str, Any]]:
@@ -1009,6 +1072,31 @@ def _official_kmeans_smote_dirs(
     }
 
 
+def _official_flowgen_pool_dir(
+    synthetic_policy_id: str,
+    split_id: str = DEFAULT_OFFICIAL_SPLIT_ID,
+) -> Dict[str, Path]:
+    base = _official_flowgen_pool_root(split_id=split_id) / synthetic_policy_id
+    return {
+        "base": base,
+        "meta": base / "meta",
+    }
+
+
+def _official_xgb_bundle_dir(
+    storage_name: str,
+    split_id: str = DEFAULT_OFFICIAL_SPLIT_ID,
+) -> Dict[str, Path]:
+    base = _official_xgb_root(split_id=split_id) / storage_name
+    return {
+        "base": base,
+        "X": base / "X",
+        "y": base / "y",
+        "removed": base / "removed",
+        "meta": base / "meta",
+    }
+
+
 def _load_promotion_manifest(path: str | Path) -> dict[str, Any]:
     payload = _load_json_dict(path)
     if not payload:
@@ -1049,6 +1137,48 @@ def _resolve_repo_path(path: str | Path) -> Path:
     if repo_candidate.exists():
         return repo_candidate
     raise FileNotFoundError(f"Path not found: {path}")
+
+
+def _resolve_flowpre_run_config_path(run_dir: Path, run_manifest: dict[str, Any], run_id: str) -> Path:
+    explicit_candidates = [
+        run_manifest.get("config_snapshot_path"),
+        run_manifest.get("config_path"),
+    ]
+    for candidate in explicit_candidates:
+        if candidate in (None, ""):
+            continue
+        resolved = _resolve_repo_path(candidate)
+        if resolved.exists():
+            return resolved
+    exact_versioned = run_dir / f"{run_id}.yaml"
+    if exact_versioned.exists():
+        return exact_versioned
+    exact_stable = run_dir / "config.yaml"
+    if exact_stable.exists():
+        return exact_stable
+    raise FileNotFoundError(
+        f"Could not resolve strict FlowPre config for run_id '{run_id}' under {run_dir}. "
+        "Expected config_snapshot_path/config_path in run manifest or exact config artifact."
+    )
+
+
+def _resolve_flowpre_run_weights_path(run_dir: Path, run_manifest: dict[str, Any], run_id: str) -> Path:
+    explicit_candidates = [
+        run_manifest.get("model_path"),
+    ]
+    for candidate in explicit_candidates:
+        if candidate in (None, ""):
+            continue
+        resolved = _resolve_repo_path(candidate)
+        if resolved.exists():
+            return resolved
+    exact_versioned = run_dir / f"{run_id}.pt"
+    if exact_versioned.exists():
+        return exact_versioned
+    raise FileNotFoundError(
+        f"Could not resolve strict FlowPre weights for run_id '{run_id}' under {run_dir}. "
+        "Expected model_path in run manifest or exact checkpoint artifact."
+    )
 
 
 def _read_bundle_csv(path: str | Path, *, name: str) -> pd.DataFrame:
@@ -1101,6 +1231,88 @@ def _copy_scaler_artifacts_to_dir(
         shutil.copy2(src_path, dst_path)
         copied[str(key)] = dst_path
     return copied
+
+
+def _artifact_hashes_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    hashes: dict[str, Any] = {"artifacts": {}, "scaler_artifacts": {}}
+    artifacts = dict(manifest.get("artifacts") or {})
+    for group_name, payload in artifacts.items():
+        if not isinstance(payload, Mapping):
+            continue
+        if group_name == "storage_name":
+            continue
+        group_hashes: dict[str, str] = {}
+        for split_name, path in dict(payload).items():
+            try:
+                group_hashes[str(split_name)] = _sha256_file(_resolve_repo_path(path))
+            except Exception:
+                group_hashes[str(split_name)] = None
+        hashes["artifacts"][str(group_name)] = group_hashes
+
+    for key, path in dict(manifest.get("scaler_artifacts") or {}).items():
+        try:
+            hashes["scaler_artifacts"][str(key)] = _sha256_file(_resolve_repo_path(path))
+        except Exception:
+            hashes["scaler_artifacts"][str(key)] = None
+    return hashes
+
+
+def _build_row_fingerprint_map(
+    *,
+    X_df: pd.DataFrame,
+    y_df: pd.DataFrame,
+) -> dict[int, str]:
+    if len(X_df) != len(y_df):
+        raise ValueError("X_df and y_df must have the same length to build row fingerprints.")
+    merged = X_df.merge(
+        y_df,
+        on="post_cleaning_index",
+        how="inner",
+        validate="one_to_one",
+        suffixes=("", "__y"),
+    )
+    out: dict[int, str] = {}
+    for _, row in merged.iterrows():
+        x_payload = {
+            col: row[col]
+            for col in X_df.columns
+            if col != "is_synth" and not col.endswith("__y")
+        }
+        y_payload = {
+            col: row[col]
+            for col in y_df.columns
+            if col != "is_synth"
+        }
+        out[int(row["post_cleaning_index"])] = _stable_dataset_row_fingerprint(
+            X_row=x_payload,
+            y_row=y_payload,
+        )
+    return out
+
+
+def _write_synthetic_train_lineage(
+    *,
+    lineage_df: pd.DataFrame,
+    X_train_aug: pd.DataFrame,
+    y_train_aug: pd.DataFrame,
+    output_path: str | Path,
+) -> Optional[Path]:
+    if lineage_df is None or lineage_df.empty:
+        return None
+    if "is_synth" not in X_train_aug.columns or "is_synth" not in y_train_aug.columns:
+        return None
+    synth_X = X_train_aug.loc[X_train_aug["is_synth"] == True].drop(columns=["is_synth"], errors="ignore")
+    synth_y = y_train_aug.loc[y_train_aug["is_synth"] == True].drop(columns=["is_synth"], errors="ignore")
+    if len(synth_X) == 0:
+        return None
+    fingerprint_map = _build_row_fingerprint_map(X_df=synth_X, y_df=synth_y)
+    lineage = lineage_df.copy()
+    lineage["row_fingerprint"] = lineage["post_cleaning_index"].astype(int).map(fingerprint_map)
+    lineage = lineage.sort_values("post_cleaning_index").reset_index(drop=True)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lineage.to_csv(output_path, index=False)
+    return output_path
 
 
 def _build_condition_value_to_label_map(
@@ -1156,6 +1368,7 @@ def materialize_kmeans_smote_joint_set(
         config_path=config_path,
         config=config,
     )
+    guardrail_policy = _load_default_f7_guardrail_policy()
     condition_col = str(cfg.condition_col)
     synthetic_policy_id = (
         f"kmeans_smote__{cfg.synthetic_policy_config_id}__seed{int(cfg.synthetic_seed)}__v1"
@@ -1195,6 +1408,31 @@ def materialize_kmeans_smote_joint_set(
         condition_values=condition_values,
         verbose=verbose,
     )
+    target_summary = resolve_f7_synthetic_targets(train_df=X_train, policy=_F7_SYNTH_CAP_POLICY)
+    final_target_count_by_class = {
+        int(cls): int(len(X_train[X_train[condition_col].astype(str) == str(cls)])) + int(target_summary["targets_by_class"].get(str(cls), 0))
+        for cls in condition_values
+    }
+    X_train_domain, y_train_domain, domain_info = _reconstruct_bundle_rows_to_modeled_raw(
+        source_manifest=source_manifest,
+        X_df=X_train,
+        y_df=y_train,
+        device="cpu",
+        verbose=False,
+    )
+    acceptance_engine = _build_f7_acceptance_engine_for_bundle(
+        source_manifest=source_manifest,
+        X_train_materialized=X_train,
+        y_train_materialized=y_train,
+        X_train_domain=X_train_domain,
+        guardrail_policy=guardrail_policy,
+    )
+    candidate_validator = _make_f7_candidate_validator(
+        engine=acceptance_engine,
+        source_manifest=source_manifest,
+        source_bundle_device="cpu",
+        verbose=False,
+    )
 
     augmented, report = augment_canonical_bundle_with_kmeans_smote(
         X_train=X_train,
@@ -1209,7 +1447,11 @@ def materialize_kmeans_smote_joint_set(
         config=cfg,
         condition_col=condition_col,
         condition_value_to_label_map=condition_value_to_label_map,
+        explicit_target_count_by_class=final_target_count_by_class,
+        candidate_validator=candidate_validator,
+        max_attempt_batches_per_class=int(guardrail_policy.max_attempt_batches_per_class),
     )
+    lineage_records = list(report.pop("synthetic_train_lineage", []) or [])
 
     X_train_aug = augmented["X_train"]
     X_val_aug = augmented["X_val"]
@@ -1232,6 +1474,19 @@ def materialize_kmeans_smote_joint_set(
     r_train_aug.to_csv(dirs["removed"] / f"{suffix}_r_train.csv", index=False)
     r_val_aug.to_csv(dirs["removed"] / f"{suffix}_r_val.csv", index=False)
     r_test_aug.to_csv(dirs["removed"] / f"{suffix}_r_test.csv", index=False)
+
+    lineage_path = None
+    if lineage_records:
+        lineage_df = pd.DataFrame(lineage_records)
+        lineage_df["is_synth"] = True
+        lineage_df["synthetic_policy_id"] = synthetic_policy_id
+        lineage_df["synthetic_policy_family"] = "kmeans_smote_joint"
+        lineage_path = _write_synthetic_train_lineage(
+            lineage_df=lineage_df,
+            X_train_aug=X_train_aug,
+            y_train_aug=y_train_aug,
+            output_path=dirs["meta"] / "synthetic_train_lineage.csv",
+        )
 
     copied_scalers = _copy_scaler_artifacts_to_dir(
         source_manifest.get("scaler_artifacts", {}),
@@ -1271,6 +1526,16 @@ def materialize_kmeans_smote_joint_set(
         "source_requirements": source_requirements,
         "config_path": None if resolved_config_path is None else path_relative_to_root(resolved_config_path),
         "config_payload": raw_cfg_payload,
+        "guardrail_policy_id": guardrail_policy.policy_id,
+        "guardrail_policy": guardrail_policy.to_dict(),
+        "raw_reconstruction_reference": domain_info,
+        "f7_target_summary": target_summary,
+        "guardrail_summary": acceptance_engine.summary(),
+        "f7_synthetic_cap_validation": summarize_f7_synthetic_cap(
+            train_df=X_train_aug,
+            policy=_F7_SYNTH_CAP_POLICY,
+        ),
+        "synthetic_train_lineage": None if lineage_path is None else path_relative_to_root(lineage_path),
     }
     dump_json(report_payload, dirs["meta"] / "kmeans_smote_joint_report.json")
 
@@ -1322,8 +1587,8 @@ def materialize_kmeans_smote_joint_set(
             "synthetic_policy_config_id": cfg.synthetic_policy_config_id,
             "synthetic_seed": int(cfg.synthetic_seed),
             "target_policy": {
-                "mode": cfg.target_mode,
-                "value": cfg.target_value,
+                "mode": "f7_policy",
+                "value": None,
             },
             "resolved_target_by_class": report["resolved_target_by_class"],
             "resolved_cluster_k_by_class": report["resolved_cluster_k_by_class"],
@@ -1332,13 +1597,17 @@ def materialize_kmeans_smote_joint_set(
             "metric_space_mode": cfg.metric_space_mode,
             "cluster_min_size": int(cfg.min_cluster_size),
             "added_by_class": report["added_by_class"],
+            "guardrail_policy_id": guardrail_policy.policy_id,
+            "guardrail_summary": report_payload["guardrail_summary"],
             "counts_by_split": counts_by_split,
             "counts_by_class": counts_by_class,
             "train_source_rows": int(len(X_train)),
             "train_augmented_rows": int(len(X_train_aug)),
             "generated_rows_total": int(report.get("generated_rows_total", 0)),
+            "synthetic_train_lineage": None if lineage_path is None else path_relative_to_root(lineage_path),
             "kmeans_smote_joint_report": path_relative_to_root(dirs["meta"] / "kmeans_smote_joint_report.json"),
             "source_requirements": source_requirements,
+            "f7_synthetic_cap_validation": report_payload["f7_synthetic_cap_validation"],
         },
     )
     dump_json(manifest, manifest_path)
@@ -1368,6 +1637,124 @@ def materialize_kmeans_smote_joint_sets(
         )
         created.append(path_relative_to_root(base_dir))
     return created
+
+
+def materialize_f7_xgb_raw_base_set(
+    *,
+    source_raw_bundle_manifest_path: str | Path | None = None,
+    dataset_name: str = "official_raw_xgb_base_v1",
+    split_id: str = DEFAULT_OFFICIAL_SPLIT_ID,
+    feature_policy: str = "raw_numeric_plus_type_onehot",
+    condition_col: str = "type",
+    force: bool = False,
+    verbose: bool = True,
+) -> tuple[Path, dict]:
+    if source_raw_bundle_manifest_path is None:
+        source_raw_bundle_manifest_path = official_raw_bundle_manifest_path(split_id=split_id)
+
+    source_manifest = _load_json_dict(_resolve_repo_path(source_raw_bundle_manifest_path))
+    if not source_manifest:
+        raise FileNotFoundError("XGBoost base materialization requires a valid raw bundle manifest.")
+
+    dirs = _official_xgb_bundle_dir(dataset_name, split_id=split_id)
+    _ensure_dirs(dirs)
+    manifest_path = dirs["meta"] / "manifest.json"
+
+    if not force and manifest_path.exists():
+        manifest = _load_json_dict(manifest_path)
+        if manifest:
+            if verbose:
+                rel = dirs["base"].relative_to(Path(ROOT_PATH))
+                log(f"📦 Exists → {rel}", verbose)
+            return dirs["base"], manifest
+
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        r_train,
+        r_val,
+        r_test,
+    ) = _load_bundle_frames_from_manifest(source_manifest)
+
+    for split_name, X_df, y_df, r_df in (
+        ("train", X_train, y_train, r_train),
+        ("val", X_val, y_val, r_val),
+        ("test", X_test, y_test, r_test),
+    ):
+        X_df.to_csv(dirs["X"] / f"{dataset_name}_X_{split_name}.csv", index=False)
+        y_df.to_csv(dirs["y"] / f"{dataset_name}_y_{split_name}.csv", index=False)
+        r_df.to_csv(dirs["removed"] / f"{dataset_name}_r_{split_name}.csv", index=False)
+
+    manifest = build_canonical_derived_manifest(
+        dataset_name=dataset_name,
+        dataset_level_axes={
+            "x_transform": "raw",
+            "y_transform": "raw",
+            "synthetic_policy": "none",
+        },
+        split_id=split_id,
+        cleaning_policy_id=str(source_manifest.get("cleaning_policy_id")),
+        source_dataset_manifest_path=_resolve_repo_path(source_raw_bundle_manifest_path),
+        source_split_manifest_path=source_manifest.get("source_split_manifest"),
+        source_cleaning_manifest_path=source_manifest.get("source_cleaning_manifest"),
+        source_manifest=source_manifest,
+        support_status="materialized_now",
+        artifacts={
+            "storage_name": dataset_name,
+            "X": {
+                "train": dirs["X"] / f"{dataset_name}_X_train.csv",
+                "val": dirs["X"] / f"{dataset_name}_X_val.csv",
+                "test": dirs["X"] / f"{dataset_name}_X_test.csv",
+            },
+            "y": {
+                "train": dirs["y"] / f"{dataset_name}_y_train.csv",
+                "val": dirs["y"] / f"{dataset_name}_y_val.csv",
+                "test": dirs["y"] / f"{dataset_name}_y_test.csv",
+            },
+            "removed": {
+                "train": dirs["removed"] / f"{dataset_name}_r_train.csv",
+                "val": dirs["removed"] / f"{dataset_name}_r_val.csv",
+                "test": dirs["removed"] / f"{dataset_name}_r_test.csv",
+            },
+        },
+        scaler_artifacts={},
+        extra_manifest_fields={
+            "condition_col": condition_col,
+            "feature_policy": feature_policy,
+            "train_source_rows": int(len(X_train)),
+            "train_augmented_rows": int(len(X_train)),
+            "generated_rows_total": 0,
+            "counts_by_split": {
+                "train": int(len(X_train)),
+                "val": int(len(X_val)),
+                "test": int(len(X_test)),
+            },
+            "counts_by_class": {
+                "train": {
+                    str(int(class_id)): int(count)
+                    for class_id, count in X_train[condition_col].astype(int).value_counts().sort_index().items()
+                },
+                "val": {
+                    str(int(class_id)): int(count)
+                    for class_id, count in X_val[condition_col].astype(int).value_counts().sort_index().items()
+                },
+                "test": {
+                    str(int(class_id)): int(count)
+                    for class_id, count in X_test[condition_col].astype(int).value_counts().sort_index().items()
+                },
+            },
+        },
+    )
+    dump_json(manifest, manifest_path)
+
+    if verbose:
+        rel = dirs["base"].relative_to(Path(ROOT_PATH))
+        log(f"✅ Saved F7 XGBoost raw base set → {rel}", verbose)
+    return dirs["base"], manifest
 
 def _flowpre_suffix(meta_tag: str, y_scaler_name: str) -> str:
     # e.g. "df_scaled_x_flowpre_rrmse_yminmax"
@@ -1535,6 +1922,133 @@ def encode_dataframe_with_flowpre_model(
     return encode_with_flowpre_model(df, model, device_obj, condition_col, cols_to_exclude)
 
 
+def decode_dataframe_with_flowpre_model(
+    model_name: str,
+    df_latent: pd.DataFrame,
+    *,
+    reference_df: pd.DataFrame,
+    condition_col: str = "type",
+    cols_to_exclude: Optional[List[str]] = None,
+    device: str = "auto",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    if cols_to_exclude is None:
+        cols_to_exclude = ["post_cleaning_index"]
+
+    import torch
+
+    from training.train_flow_pre import build_flow_pre_model, filter_flowpre_columns
+    from training.utils import load_yaml_config, select_training_device
+
+    config_path, model_path = _locate_model_artifacts(model_name, model_family="flow_pre")
+    config = load_yaml_config(config_path)
+    device_obj = select_training_device(device)
+
+    ref_filtered = filter_flowpre_columns(reference_df, cols_to_exclude, condition_col)
+    feature_cols = [c for c in ref_filtered.columns if c != condition_col]
+    latent_cols = [
+        c for c in df_latent.columns if c not in {"post_cleaning_index", condition_col, "is_synth"}
+    ]
+    if not latent_cols:
+        raise ValueError("No latent columns found to decode with FlowPre.")
+
+    num_classes = int(ref_filtered[condition_col].nunique())
+    model = build_flow_pre_model(
+        config["model"],
+        input_dim=len(feature_cols),
+        num_classes=num_classes,
+        device=device_obj,
+    )
+    state_dict = torch.load(model_path, map_location=device_obj)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    latent_values = torch.tensor(df_latent[latent_cols].values, dtype=torch.float32).to(device_obj)
+    class_labels = torch.tensor(df_latent[condition_col].values, dtype=torch.long).to(device_obj)
+    with torch.no_grad():
+        x_rec, _ = model.inverse(latent_values, class_labels)
+
+    decoded = pd.DataFrame(x_rec.detach().cpu().numpy(), columns=feature_cols, index=df_latent.index)
+    decoded.insert(0, condition_col, df_latent[condition_col].values)
+    if "post_cleaning_index" in df_latent.columns:
+        decoded.insert(0, "post_cleaning_index", df_latent["post_cleaning_index"].values)
+    if verbose:
+        log(f"📦 Decoded dataframe with FlowPre model: {model_name}", verbose)
+    return decoded
+
+
+def _load_flowpre_model_from_promotion(
+    promotion_manifest_path: str | Path,
+    *,
+    x_reference: pd.DataFrame,
+    condition_col: str = "type",
+    device: str = "auto",
+) -> tuple[Any, Any, dict[str, Any], Path]:
+    import torch
+
+    from training.train_flow_pre import build_flow_pre_model, filter_flowpre_columns
+    from training.utils import load_yaml_config, select_training_device
+
+    promotion_manifest = _load_promotion_manifest(promotion_manifest_path)
+    run_dir, run_manifest = _run_manifest_to_run_dir(promotion_manifest["source_run_manifest"])
+    run_id = str(run_manifest.get("run_id", run_dir.name))
+
+    cfg_path = _resolve_flowpre_run_config_path(run_dir, run_manifest, run_id)
+    pt_path = _resolve_flowpre_run_weights_path(run_dir, run_manifest, run_id)
+
+    config = load_yaml_config(cfg_path)
+    model_cfg = config["model"]
+    device_obj = select_training_device(device)
+
+    ref_filtered = filter_flowpre_columns(
+        x_reference,
+        cols_to_exclude=["post_cleaning_index"],
+        condition_col=condition_col,
+    )
+    input_dim = ref_filtered.drop(columns=[condition_col]).shape[1]
+    num_classes = int(ref_filtered[condition_col].nunique())
+
+    model = build_flow_pre_model(
+        model_cfg,
+        input_dim=input_dim,
+        num_classes=num_classes,
+        device=device_obj,
+    )
+    state_dict = torch.load(pt_path, map_location=device_obj)
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model, device_obj, promotion_manifest, pt_path
+
+
+def encode_dataframe_with_flowpre_promotion(
+    promotion_manifest_path: str | Path,
+    df: pd.DataFrame,
+    *,
+    reference_df: pd.DataFrame,
+    condition_col: str = "type",
+    cols_to_exclude: Optional[List[str]] = None,
+    device: str = "auto",
+) -> pd.DataFrame:
+    if cols_to_exclude is None:
+        cols_to_exclude = ["post_cleaning_index"]
+
+    from training.train_flow_pre import encode_with_flowpre_model
+
+    model, device_obj, _, _ = _load_flowpre_model_from_promotion(
+        promotion_manifest_path,
+        x_reference=reference_df,
+        condition_col=condition_col,
+        device=device,
+    )
+    return encode_with_flowpre_model(
+        df,
+        model=model,
+        device=device_obj,
+        condition_col=condition_col,
+        cols_to_exclude=cols_to_exclude,
+    )
+
+
 def _load_flowgen_model_from_promotion(
     promotion_manifest_path: str | Path,
     *,
@@ -1600,6 +2114,225 @@ def _load_flowgen_model_from_promotion(
     model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model, device_obj, promotion_manifest, pt_path
+
+
+def _inverse_transform_scaled_frame(
+    *,
+    df: pd.DataFrame,
+    scaler_path: str | Path,
+    fit_cols: list[str],
+) -> pd.DataFrame:
+    scaler = joblib.load(_resolve_repo_path(scaler_path))
+    work = df.copy()
+    if fit_cols:
+        work[fit_cols] = scaler.inverse_transform(work[fit_cols])
+    return work
+
+
+def _reconstruct_bundle_rows_to_modeled_raw(
+    *,
+    source_manifest: Mapping[str, Any],
+    X_df: pd.DataFrame,
+    y_df: pd.DataFrame,
+    device: str = "cpu",
+    verbose: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    import torch
+
+    source_axes = dict(source_manifest.get("dataset_level_axes") or {})
+    x_transform = str(source_axes.get("x_transform") or "")
+    y_transform = str(source_axes.get("y_transform") or "")
+    info: dict[str, Any] = {
+        "x_transform": x_transform,
+        "y_transform": y_transform,
+        "raw_reconstruction_status": "ok",
+    }
+
+    raw_bundle_manifest_path = source_manifest.get("source_dataset_manifest")
+    raw_bundle_manifest = _load_json_dict(_resolve_repo_path(raw_bundle_manifest_path))
+    if not raw_bundle_manifest:
+        raise FileNotFoundError("Source bundle manifest is missing source_dataset_manifest for raw reconstruction.")
+    X_raw_train, _, _, y_raw_train, _, _, _, _, _ = _load_bundle_frames_from_manifest(raw_bundle_manifest)
+
+    X_raw_like: pd.DataFrame
+    if x_transform == "raw":
+        X_raw_like = X_df.copy()
+        info["x_reconstruction_mode"] = "identity_raw"
+    elif x_transform.startswith("flowpre_"):
+        upstream_manifests = list(source_manifest.get("upstream_model_manifests") or [])
+        if not upstream_manifests:
+            raise ValueError(f"Bundle with x_transform={x_transform} is missing upstream FlowPre manifest.")
+        flowpre_model, device_obj, _, _ = _load_flowpre_model_from_promotion(
+            upstream_manifests[0],
+            x_reference=X_raw_train,
+            condition_col="type",
+            device=device,
+        )
+        latent_cols = [c for c in X_df.columns if c not in {"post_cleaning_index", "type", "is_synth"}]
+        latent_values = torch.tensor(X_df[latent_cols].values, dtype=torch.float32).to(device_obj)
+        class_labels = torch.tensor(X_df["type"].values, dtype=torch.long).to(device_obj)
+        with torch.no_grad():
+            x_rec, _ = flowpre_model.inverse(latent_values, class_labels)
+        feature_cols = [c for c in X_raw_train.columns if c not in {"post_cleaning_index", "type"}]
+        X_raw_like = pd.DataFrame(x_rec.detach().cpu().numpy(), columns=feature_cols, index=X_df.index)
+        X_raw_like.insert(0, "type", X_df["type"].values)
+        X_raw_like.insert(0, "post_cleaning_index", X_df["post_cleaning_index"].values)
+        info["x_reconstruction_mode"] = "flowpre_inverse"
+    else:
+        x_scaler_meta = dict(source_manifest.get("x_scaler") or {})
+        x_fit_cols = [str(col) for col in x_scaler_meta.get("fit_cols") or []]
+        scaler_artifacts = dict(source_manifest.get("scaler_artifacts") or {})
+        if "X" not in scaler_artifacts or not x_fit_cols:
+            raise ValueError(f"Bundle with x_transform={x_transform} is missing X scaler metadata.")
+        X_raw_like = _inverse_transform_scaled_frame(
+            df=X_df,
+            scaler_path=scaler_artifacts["X"],
+            fit_cols=x_fit_cols,
+        )
+        info["x_reconstruction_mode"] = "classical_scaler_inverse"
+
+    if y_transform == "raw":
+        y_raw_like = y_df.copy()
+        info["y_reconstruction_mode"] = "identity_raw"
+    else:
+        y_scaler_meta = dict(source_manifest.get("y_scaler") or {})
+        y_fit_cols = [str(col) for col in y_scaler_meta.get("fit_cols") or []]
+        scaler_artifacts = dict(source_manifest.get("scaler_artifacts") or {})
+        if "y" not in scaler_artifacts or not y_fit_cols:
+            raise ValueError(f"Bundle with y_transform={y_transform} is missing y scaler metadata.")
+        y_raw_like = _inverse_transform_scaled_frame(
+            df=y_df,
+            scaler_path=scaler_artifacts["y"],
+            fit_cols=y_fit_cols,
+        )
+        info["y_reconstruction_mode"] = "y_scaler_inverse"
+    return X_raw_like, y_raw_like, info
+
+
+def _load_default_f7_guardrail_policy() -> F7SyntheticGuardrailPolicy:
+    default_path = Path(ROOT_PATH) / "config" / "f7_synthetic_guardrails_v1.yaml"
+    if default_path.exists():
+        policy, _, _ = load_f7_synthetic_guardrail_policy(config_path=default_path)
+        return policy
+    return _F7_GUARDRAIL_POLICY
+
+
+def _build_f7_acceptance_engine_for_bundle(
+    *,
+    source_manifest: Mapping[str, Any],
+    X_train_materialized: pd.DataFrame,
+    y_train_materialized: pd.DataFrame,
+    X_train_domain: pd.DataFrame,
+    guardrail_policy: F7SyntheticGuardrailPolicy,
+) -> F7SyntheticAcceptanceEngine:
+    cleaning_manifest_path = source_manifest.get("source_cleaning_manifest")
+    cleaning_artifacts = load_cleaning_audit_artifacts(cleaning_manifest_path=cleaning_manifest_path)
+    real_audit_view = build_modeled_raw_cleaning_audit_view(
+        X_df=X_train_domain,
+        condition_col=guardrail_policy.condition_col,
+    )
+    return F7SyntheticAcceptanceEngine(
+        real_X_train=X_train_materialized,
+        real_y_train=y_train_materialized,
+        cap_policy=_F7_SYNTH_CAP_POLICY,
+        guardrail_policy=guardrail_policy,
+        cleaning_audit_artifacts=cleaning_artifacts,
+        real_X_audit_view=real_audit_view,
+    )
+
+
+def _make_f7_candidate_validator(
+    *,
+    engine: F7SyntheticAcceptanceEngine,
+    source_manifest: Mapping[str, Any] | None = None,
+    source_bundle_device: str = "cpu",
+    verbose: bool = False,
+):
+    def _validator(
+        X_batch: pd.DataFrame,
+        y_batch: pd.DataFrame,
+        *,
+        class_value: int,
+        class_label: str,
+        attempt_idx: int,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+        del class_value, class_label
+        X_domain = X_batch
+        y_domain = y_batch
+        reconstruction_info = {"raw_reconstruction_status": "same_as_materialized"}
+        if source_manifest is not None:
+            X_domain, y_domain, reconstruction_info = _reconstruct_bundle_rows_to_modeled_raw(
+                source_manifest=source_manifest,
+                X_df=X_batch,
+                y_df=y_batch,
+                device=source_bundle_device,
+                verbose=verbose,
+            )
+
+        accepted_x, accepted_y, _, _, batch_summary = engine.accept_batch(
+            X_batch_materialized=X_batch,
+            y_batch_materialized=y_batch,
+            X_batch_domain=X_domain,
+            y_batch_domain=y_domain,
+        )
+        batch_summary["reconstruction_info"] = reconstruction_info
+        batch_summary["attempt_idx"] = int(attempt_idx)
+        return accepted_x, accepted_y, batch_summary
+
+    return _validator
+
+
+def _project_modeled_raw_candidates_into_source_bundle(
+    *,
+    source_manifest: Mapping[str, Any],
+    X_raw_candidates: pd.DataFrame,
+    y_raw_candidates: pd.DataFrame,
+    device: str = "cpu",
+    verbose: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    source_axes = dict(source_manifest.get("dataset_level_axes") or {})
+    x_transform = str(source_axes.get("x_transform") or "")
+    raw_bundle_manifest = _load_json_dict(_resolve_repo_path(source_manifest.get("source_dataset_manifest")))
+    if not raw_bundle_manifest:
+        raise FileNotFoundError("Source bundle is missing source_dataset_manifest for synthetic projection.")
+    X_raw_reference, _, _, _, _, _, _, _, _ = _load_bundle_frames_from_manifest(raw_bundle_manifest)
+
+    if x_transform == "raw":
+        X_projected = X_raw_candidates.copy()
+    elif x_transform.startswith("flowpre_"):
+        upstream_manifests = list(source_manifest.get("upstream_model_manifests") or [])
+        if not upstream_manifests:
+            raise ValueError(f"FlowPre source bundle '{x_transform}' is missing upstream promotion manifest.")
+        X_projected = encode_dataframe_with_flowpre_promotion(
+            upstream_manifests[0],
+            X_raw_candidates,
+            reference_df=X_raw_reference,
+            condition_col="type",
+            cols_to_exclude=["post_cleaning_index"],
+            device=device,
+        )
+    else:
+        x_scaler_meta = dict(source_manifest.get("x_scaler") or {})
+        x_fit_cols = [str(col) for col in x_scaler_meta.get("fit_cols") or []]
+        scaler_artifacts = dict(source_manifest.get("scaler_artifacts") or {})
+        if "X" not in scaler_artifacts or not x_fit_cols:
+            raise ValueError(f"Bundle with x_transform={x_transform} is missing X scaler metadata.")
+        X_projected = X_raw_candidates.copy()
+        x_scaler = joblib.load(_resolve_repo_path(scaler_artifacts["X"]))
+        X_projected[x_fit_cols] = x_scaler.transform(X_projected[x_fit_cols])
+
+    if str(source_axes.get("y_transform") or "") == "raw":
+        y_projected = y_raw_candidates.copy()
+    else:
+        y_scaler_meta = dict(source_manifest.get("y_scaler") or {})
+        y_fit_cols = [str(col) for col in y_scaler_meta.get("fit_cols") or []]
+        scaler_artifacts = dict(source_manifest.get("scaler_artifacts") or {})
+        if "y" not in scaler_artifacts or not y_fit_cols:
+            raise ValueError("Source bundle is missing y scaler metadata required for synthetic projection.")
+        y_scaler = joblib.load(_resolve_repo_path(scaler_artifacts["y"]))
+        y_projected = y_raw_candidates.copy()
+        y_projected[y_fit_cols] = y_scaler.transform(y_projected[y_fit_cols])
+    return X_projected, y_projected
 
 def save_flowpre_scaled_bundle(
     X_lat_train: pd.DataFrame, X_lat_val: pd.DataFrame, X_lat_test: pd.DataFrame,
@@ -2015,15 +2748,29 @@ def materialize_official_flowpre_sets(
         if verbose:
             log(f"🌀 Encoding X with official FlowPre upstream [{tag}] → {model_name}", verbose)
 
-        X_lat_train, X_lat_val, X_lat_test = transform_X_with_flowpre_model(
-            model_name=model_name,
-            X_train=X_train,
-            X_val=X_val,
-            X_test=X_test,
+        X_lat_train = encode_dataframe_with_flowpre_promotion(
+            promotion_manifest_path,
+            X_train,
+            reference_df=X_train,
             condition_col=condition_col,
             cols_to_exclude=["post_cleaning_index"],
             device=device,
-            verbose=verbose,
+        )
+        X_lat_val = encode_dataframe_with_flowpre_promotion(
+            promotion_manifest_path,
+            X_val,
+            reference_df=X_train,
+            condition_col=condition_col,
+            cols_to_exclude=["post_cleaning_index"],
+            device=device,
+        )
+        X_lat_test = encode_dataframe_with_flowpre_promotion(
+            promotion_manifest_path,
+            X_test,
+            reference_df=X_train,
+            condition_col=condition_col,
+            cols_to_exclude=["post_cleaning_index"],
+            device=device,
         )
 
         for y_scaler_name in y_scalers:
@@ -2146,6 +2893,143 @@ def _sample_flowgen_train_only_raw(
     X_synth = pd.concat(x_chunks, axis=0).sort_values("post_cleaning_index").reset_index(drop=True)
     y_synth = pd.concat(y_chunks, axis=0).sort_values("post_cleaning_index").reset_index(drop=True)
     return X_synth, y_synth, added_by_class, majority
+
+
+def _sample_flowgen_f7_raw(
+    flowgen_promotion_manifest_path: str | Path,
+    *,
+    X_train_raw: pd.DataFrame,
+    y_train_raw: pd.DataFrame,
+    acceptance_engine: F7SyntheticAcceptanceEngine,
+    source_manifest: Mapping[str, Any] | None = None,
+    condition_col: str = "type",
+    device: str = "cpu",
+    verbose: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], list[dict[str, Any]]]:
+    import torch
+
+    model, device_obj, _, _ = _load_flowgen_model_from_promotion(
+        flowgen_promotion_manifest_path,
+        x_reference=X_train_raw,
+        y_reference=y_train_raw,
+        condition_col=condition_col,
+        device=device,
+    )
+
+    x_cols = [c for c in X_train_raw.columns if c not in ("post_cleaning_index", condition_col)]
+    y_cols = [c for c in y_train_raw.columns if c != "post_cleaning_index"]
+    counts = X_train_raw[condition_col].astype(int).value_counts().sort_index()
+
+    accepted_raw_x_parts: list[pd.DataFrame] = []
+    accepted_raw_y_parts: list[pd.DataFrame] = []
+    class_reports: dict[str, Any] = {}
+    lineage_records: list[dict[str, Any]] = []
+
+    for cls, cls_count in counts.items():
+        class_label = str(int(cls))
+        target_synth = int(acceptance_engine.target_counts_by_class.get(class_label, 0))
+        if target_synth <= 0:
+            class_reports[class_label] = {
+                "observed_count": int(cls_count),
+                "target_synth_rows": 0,
+                "accepted_synth_rows": 0,
+                "attempt_batches": 0,
+                "batch_reports": [],
+            }
+            continue
+
+        if verbose:
+            log(f"🧪 F7 FlowGen sampling class={int(cls)} target_synth={target_synth}", verbose)
+
+        accepted_x_class_parts: list[pd.DataFrame] = []
+        accepted_y_class_parts: list[pd.DataFrame] = []
+        batch_reports: list[dict[str, Any]] = []
+
+        while int(acceptance_engine.accepted_counts_by_class.get(class_label, 0)) < target_synth:
+            remaining = target_synth - int(acceptance_engine.accepted_counts_by_class.get(class_label, 0))
+            batch_size = resolve_retry_batch_size(remaining=remaining, policy=acceptance_engine.guardrail_policy)
+            acceptance_engine.note_attempt_batch(class_label=class_label)
+            class_labels = torch.full((batch_size,), int(cls), dtype=torch.long, device=device_obj)
+            with torch.no_grad():
+                xs_c, ys_c = model.sample_xy(batch_size, class_labels)
+
+            xs_np = xs_c.detach().cpu().numpy()
+            ys_np = ys_c.detach().cpu().numpy()
+            idx_block = np.arange(-len(xs_np), 0, dtype=int)
+            X_raw_batch = pd.DataFrame(xs_np, columns=x_cols)
+            X_raw_batch.insert(0, condition_col, int(cls))
+            X_raw_batch.insert(0, "post_cleaning_index", idx_block)
+            y_raw_batch = pd.DataFrame(ys_np, columns=y_cols)
+            y_raw_batch.insert(0, "post_cleaning_index", idx_block)
+
+            if source_manifest is None:
+                X_projected_batch = X_raw_batch.copy()
+                y_projected_batch = y_raw_batch.copy()
+            else:
+                X_projected_batch, y_projected_batch = _project_modeled_raw_candidates_into_source_bundle(
+                    source_manifest=source_manifest,
+                    X_raw_candidates=X_raw_batch,
+                    y_raw_candidates=y_raw_batch,
+                    device=device,
+                    verbose=False,
+                )
+            accepted_x_mat, accepted_y_mat, accepted_x_raw, accepted_y_raw, batch_summary = acceptance_engine.accept_batch(
+                X_batch_materialized=X_projected_batch,
+                y_batch_materialized=y_projected_batch,
+                X_batch_domain=X_raw_batch,
+                y_batch_domain=y_raw_batch,
+            )
+
+            batch_reports.append(
+                {
+                    "requested_batch_size": int(batch_size),
+                    **batch_summary,
+                }
+            )
+            if len(accepted_x_raw) > 0:
+                accepted_x_class_parts.append(accepted_x_raw)
+                accepted_y_class_parts.append(accepted_y_raw)
+                accepted_after = int(acceptance_engine.accepted_counts_by_class.get(class_label, 0))
+                accepted_before = int(accepted_after - len(accepted_x_raw))
+                ordered_indices = accepted_x_raw["post_cleaning_index"].astype(int).tolist()
+                for offset, post_cleaning_index in enumerate(ordered_indices, start=1):
+                    lineage_records.append(
+                        {
+                            "post_cleaning_index": int(post_cleaning_index),
+                            "type": int(cls),
+                            "source_class": int(cls),
+                            "accept_attempt_batch": int(acceptance_engine.attempt_batches_by_class.get(class_label, 0)),
+                            "accept_rank_within_class": int(accepted_before + offset),
+                        }
+                    )
+
+            if acceptance_engine.attempt_batches_by_class[class_label] >= acceptance_engine.guardrail_policy.max_attempt_batches_per_class and int(acceptance_engine.accepted_counts_by_class.get(class_label, 0)) < target_synth:
+                raise RuntimeError(
+                    f"FlowGen F7 materialization could not meet class={int(cls)} target after "
+                    f"{acceptance_engine.guardrail_policy.max_attempt_batches_per_class} batches."
+                )
+
+        if accepted_x_class_parts:
+            accepted_raw_x_parts.append(pd.concat(accepted_x_class_parts, axis=0, ignore_index=True))
+            accepted_raw_y_parts.append(pd.concat(accepted_y_class_parts, axis=0, ignore_index=True))
+
+        class_reports[class_label] = {
+            "observed_count": int(cls_count),
+            "target_synth_rows": int(target_synth),
+            "accepted_synth_rows": int(acceptance_engine.accepted_counts_by_class.get(class_label, 0)),
+            "attempt_batches": int(acceptance_engine.attempt_batches_by_class.get(class_label, 0)),
+            "batch_reports": batch_reports,
+        }
+
+    if accepted_raw_x_parts:
+        X_synth = pd.concat(accepted_raw_x_parts, axis=0, ignore_index=True).sort_values("post_cleaning_index").reset_index(drop=True)
+        y_synth = pd.concat(accepted_raw_y_parts, axis=0, ignore_index=True).sort_values("post_cleaning_index").reset_index(drop=True)
+    else:
+        X_synth = X_train_raw.iloc[0:0].copy()
+        y_synth = y_train_raw.iloc[0:0].copy()
+
+    lineage_records = sorted(lineage_records, key=lambda row: int(row["post_cleaning_index"]))
+    return X_synth, y_synth, class_reports, lineage_records
 
 
 def materialize_official_flowgen_augmented_set(
@@ -2368,6 +3252,10 @@ def materialize_official_flowgen_augmented_set(
             "added_train_rows_by_class": added_by_class,
             "condition_col": condition_col,
             "is_synth_scope": "train_only",
+            "f7_synthetic_cap_validation": summarize_f7_synthetic_cap(
+                train_df=X_train_aug,
+                policy=_F7_SYNTH_CAP_POLICY,
+            ),
         },
     )
     dump_json(manifest, dirs["meta"] / "manifest.json")
@@ -2401,6 +3289,508 @@ def materialize_official_flowgen_augmented_sets(
             split_id=split_id,
             source_dataset_name=source_dataset_name,
             target=target,
+            force=force,
+            device=device,
+            verbose=verbose,
+        )
+        created.append(base_dir.name)
+    return created
+
+
+def _load_flowgen_pool_payload(
+    pool_manifest_path: str | Path,
+) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    pool_manifest = _load_json_dict(_resolve_repo_path(pool_manifest_path))
+    if not pool_manifest:
+        raise FileNotFoundError(f"FlowGen pool manifest not found: {pool_manifest_path}")
+    artifacts = dict(pool_manifest.get("artifacts") or {})
+    pool_rows_path = artifacts.get("pool_rows")
+    lineage_path = artifacts.get("synthetic_train_lineage")
+    if not pool_rows_path:
+        raise ValueError("FlowGen pool manifest is missing artifacts.pool_rows.")
+    pool_rows = _read_bundle_csv(pool_rows_path, name="flowgen_pool_rows")
+    x_cols = list(pool_manifest.get("x_cols") or [])
+    y_cols = list(pool_manifest.get("y_cols") or [])
+    if not x_cols or not y_cols:
+        raise ValueError("FlowGen pool manifest is missing x_cols or y_cols.")
+    X_synth_raw = pool_rows[["post_cleaning_index", "type", *x_cols]].copy()
+    y_synth_raw = pool_rows[["post_cleaning_index", *y_cols]].copy()
+    lineage_df = (
+        pd.read_csv(_resolve_repo_path(lineage_path))
+        if lineage_path and _resolve_repo_path(lineage_path).exists()
+        else pd.DataFrame()
+    )
+    if not lineage_df.empty and "post_cleaning_index" in lineage_df.columns:
+        lineage_df["post_cleaning_index"] = lineage_df["post_cleaning_index"].astype(int)
+    return pool_manifest, X_synth_raw, y_synth_raw, lineage_df
+
+
+def materialize_f7_flowgen_synthetic_pool(
+    *,
+    flowgen_promotion_manifest_path: str | Path,
+    synthetic_policy_variant: str,
+    source_raw_bundle_manifest_path: str | Path | None = None,
+    consumer_dataset_ids: list[str] | None = None,
+    condition_col: str = "type",
+    force: bool = False,
+    device: str = "cpu",
+    verbose: bool = True,
+) -> tuple[Path, dict]:
+    if synthetic_policy_variant not in {"flowgen_official", "flowgen_train_only"}:
+        raise ValueError(
+            "synthetic_policy_variant must be 'flowgen_official' or 'flowgen_train_only'."
+        )
+    if source_raw_bundle_manifest_path is None:
+        source_raw_bundle_manifest_path = official_raw_bundle_manifest_path()
+    raw_bundle_manifest = _load_json_dict(_resolve_repo_path(source_raw_bundle_manifest_path))
+    if not raw_bundle_manifest:
+        raise FileNotFoundError("FlowGen pool materialization requires a valid raw bundle manifest.")
+
+    split_id = str(raw_bundle_manifest.get("split_id") or DEFAULT_OFFICIAL_SPLIT_ID)
+    flowgen_promotion = _load_promotion_manifest(flowgen_promotion_manifest_path)
+    flowgen_source_id = str(flowgen_promotion.get("source_id") or "flowgen_unknown")
+    synthetic_policy_id = _with_version_suffix(f"{synthetic_policy_variant}__{flowgen_source_id}")
+    dirs = _official_flowgen_pool_dir(synthetic_policy_id, split_id=split_id)
+    _ensure_dirs(dirs)
+    manifest_path = dirs["meta"] / "pool_manifest.json"
+
+    if not force and manifest_path.exists():
+        manifest = _load_json_dict(manifest_path)
+        if manifest:
+            if verbose:
+                rel = dirs["base"].relative_to(Path(ROOT_PATH))
+                log(f"📦 Exists → {rel}", verbose)
+            return dirs["base"], manifest
+
+    (
+        X_train_raw,
+        _X_val_raw,
+        _X_test_raw,
+        y_train_raw,
+        _y_val_raw,
+        _y_test_raw,
+        _r_train_raw,
+        _r_val_raw,
+        _r_test_raw,
+    ) = _load_bundle_frames_from_manifest(raw_bundle_manifest)
+
+    guardrail_policy = _load_default_f7_guardrail_policy()
+    target_summary = resolve_f7_synthetic_targets(train_df=X_train_raw, policy=_F7_SYNTH_CAP_POLICY)
+    acceptance_engine = _build_f7_acceptance_engine_for_bundle(
+        source_manifest=raw_bundle_manifest,
+        X_train_materialized=X_train_raw,
+        y_train_materialized=y_train_raw,
+        X_train_domain=X_train_raw,
+        guardrail_policy=guardrail_policy,
+    )
+
+    sample_result = _sample_flowgen_f7_raw(
+        flowgen_promotion_manifest_path,
+        X_train_raw=X_train_raw,
+        y_train_raw=y_train_raw,
+        acceptance_engine=acceptance_engine,
+        source_manifest=None,
+        condition_col=condition_col,
+        device=device,
+        verbose=verbose,
+    )
+    if len(sample_result) == 4:
+        X_synth_raw, y_synth_raw, class_reports, lineage_records = sample_result
+    elif len(sample_result) == 3:
+        X_synth_raw, y_synth_raw, class_reports = sample_result
+        lineage_records = []
+    else:
+        raise ValueError("_sample_flowgen_f7_raw returned an unexpected payload shape.")
+
+    x_cols = [c for c in X_synth_raw.columns if c not in {"post_cleaning_index", condition_col}]
+    y_cols = [c for c in y_synth_raw.columns if c != "post_cleaning_index"]
+    pool_rows = X_synth_raw.merge(
+        y_synth_raw,
+        on="post_cleaning_index",
+        how="inner",
+        validate="one_to_one",
+    )
+    pool_rows_path = dirs["meta"] / "pool_synthetic_rows.csv"
+    pool_rows.to_csv(pool_rows_path, index=False)
+
+    lineage_path = None
+    if lineage_records:
+        lineage_df = pd.DataFrame(lineage_records)
+        lineage_df["is_synth"] = True
+        lineage_df["synthetic_policy_id"] = synthetic_policy_id
+        lineage_df["synthetic_policy_family"] = "flowgen"
+        lineage_path = _write_synthetic_train_lineage(
+            lineage_df=lineage_df,
+            X_train_aug=pd.concat([X_train_raw.assign(is_synth=False), X_synth_raw.assign(is_synth=True)], axis=0, ignore_index=True),
+            y_train_aug=pd.concat([y_train_raw.assign(is_synth=False), y_synth_raw.assign(is_synth=True)], axis=0, ignore_index=True),
+            output_path=dirs["meta"] / "synthetic_train_lineage.csv",
+        )
+
+    pool_summary = {
+        "pool_id": synthetic_policy_id,
+        "synthetic_policy_variant": synthetic_policy_variant,
+        "flowgen_source_id": flowgen_source_id,
+        "split_id": split_id,
+        "counts_by_class_real": {
+            str(class_id): int(payload.get("n_real", 0))
+            for class_id, payload in dict(target_summary.get("per_class") or {}).items()
+        },
+        "target_synth_by_class": target_summary["targets_by_class"],
+        "accepted_counts_by_class": {
+            str(label): int(value) for label, value in acceptance_engine.accepted_counts_by_class.items()
+        },
+        "reject_counts_by_reason": acceptance_engine.summary().get("reject_counts_by_reason", {}),
+        "attempt_batches_by_class": {
+            str(label): int(value) for label, value in acceptance_engine.attempt_batches_by_class.items()
+        },
+        "soft_audit_counts": acceptance_engine.summary().get("soft_audit_counts", {}),
+        "accepted_row_fingerprints_hash": acceptance_engine.summary().get("accepted_sample_fingerprint_sha256", []),
+        "consumer_dataset_ids": list(consumer_dataset_ids or []),
+    }
+    dump_json(pool_summary, dirs["meta"] / "pool_summary.json")
+
+    manifest = {
+        "pool_id": synthetic_policy_id,
+        "pool_role": "flowgen_shared_synthetic_pool",
+        "policy_status": "canonical",
+        "split_id": split_id,
+        "synthetic_policy_variant": synthetic_policy_variant,
+        "synthetic_policy_family": "flowgen",
+        "synthetic_policy_id": synthetic_policy_id,
+        "flowgen_source_id": flowgen_source_id,
+        "source_raw_bundle_manifest": path_relative_to_root(_resolve_repo_path(source_raw_bundle_manifest_path)),
+        "flowgen_promotion_manifest": path_relative_to_root(_resolve_repo_path(flowgen_promotion_manifest_path)),
+        "x_cols": x_cols,
+        "y_cols": y_cols,
+        "condition_col": condition_col,
+        "guardrail_policy_id": guardrail_policy.policy_id,
+        "guardrail_summary": acceptance_engine.summary(),
+        "f7_target_summary": target_summary,
+        "class_reports": class_reports,
+        "consumer_dataset_ids": list(consumer_dataset_ids or []),
+        "counts_by_class_real": {
+            str(class_id): int(payload.get("n_real", 0))
+            for class_id, payload in dict(target_summary.get("per_class") or {}).items()
+        },
+        "target_synth_by_class": target_summary["targets_by_class"],
+        "accepted_counts_by_class": {
+            str(label): int(value) for label, value in acceptance_engine.accepted_counts_by_class.items()
+        },
+        "artifacts": {
+            "pool_rows": path_relative_to_root(pool_rows_path),
+            "synthetic_train_lineage": None if lineage_path is None else path_relative_to_root(lineage_path),
+        },
+        "pool_artifact_hashes": {
+            "pool_rows": _sha256_file(pool_rows_path),
+            "synthetic_train_lineage": None if lineage_path is None else _sha256_file(lineage_path),
+        },
+        "created_at_utc": _utc_now_iso(),
+    }
+    dump_json(manifest, manifest_path)
+
+    if verbose:
+        rel = dirs["base"].relative_to(Path(ROOT_PATH))
+        log(f"✅ Saved F7 FlowGen synthetic pool → {rel}", verbose)
+    return dirs["base"], manifest
+
+
+def materialize_f7_flowgen_augmented_set_from_pool(
+    source_bundle_manifest_path: str | Path,
+    *,
+    flowgen_pool_manifest_path: str | Path,
+    synthetic_policy_variant: str,
+    condition_col: str = "type",
+    force: bool = False,
+    device: str = "cpu",
+    verbose: bool = True,
+) -> tuple[Path, dict]:
+    source_manifest = _load_promotion_manifest(source_bundle_manifest_path)
+    if str(source_manifest.get("policy_status", "")).lower() != "canonical":
+        raise ValueError("F7 FlowGen materialization requires a canonical source bundle manifest.")
+    if str(source_manifest.get("dataset_role", "")).lower() != "derived_modeling_bundle":
+        raise ValueError("F7 FlowGen materialization requires a canonical derived bundle source.")
+
+    source_axes = dict(source_manifest.get("dataset_level_axes") or {})
+    if str(source_axes.get("synthetic_policy", "none")).lower() != "none":
+        raise ValueError("F7 FlowGen materialization requires a non-synthetic source bundle.")
+
+    split_id = str(source_manifest.get("split_id") or DEFAULT_OFFICIAL_SPLIT_ID)
+    source_storage_name = str(
+        (source_manifest.get("artifacts") or {}).get("storage_name")
+        or source_manifest.get("dataset_name")
+        or "bundle"
+    )
+    pool_manifest, X_synth_raw, y_synth_raw, pool_lineage = _load_flowgen_pool_payload(flowgen_pool_manifest_path)
+    synthetic_policy_id = str(pool_manifest.get("synthetic_policy_id") or pool_manifest.get("pool_id"))
+    storage_name = f"{source_storage_name}__syn-{synthetic_policy_id}"
+    base_dir = _official_augmented_bundle_dir(storage_name, split_id=split_id)
+    dirs = {
+        "base": base_dir,
+        "X": base_dir / "X",
+        "y": base_dir / "y",
+        "removed": base_dir / "removed",
+        "scalers": base_dir / "scalers",
+        "meta": base_dir / "meta",
+    }
+    _ensure_dirs(dirs)
+    manifest_path = dirs["meta"] / "manifest.json"
+
+    if not force and manifest_path.exists():
+        manifest = _load_json_dict(manifest_path)
+        if manifest:
+            if verbose:
+                rel = dirs["base"].relative_to(Path(ROOT_PATH))
+                log(f"📦 Exists → {rel}", verbose)
+            return dirs["base"], manifest
+
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        r_train,
+        r_val,
+        r_test,
+    ) = _load_bundle_frames_from_manifest(source_manifest)
+
+    if len(X_synth_raw) > 0:
+        X_synth_projected, y_synth_projected = _project_modeled_raw_candidates_into_source_bundle(
+            source_manifest=source_manifest,
+            X_raw_candidates=X_synth_raw,
+            y_raw_candidates=y_synth_raw,
+            device=device,
+            verbose=False,
+        )
+    else:
+        X_synth_projected = X_train.iloc[0:0].copy()
+        y_synth_projected = y_train.iloc[0:0].copy()
+
+    X_train_aug = X_train.copy()
+    if "is_synth" not in X_train_aug.columns:
+        X_train_aug.insert(2, "is_synth", False)
+    y_train_aug = y_train.copy()
+    if "is_synth" not in y_train_aug.columns:
+        y_train_aug.insert(1, "is_synth", False)
+
+    if len(X_synth_projected) > 0:
+        X_synth_projected = X_synth_projected.copy()
+        y_synth_projected = y_synth_projected.copy()
+        X_synth_projected.insert(2, "is_synth", True)
+        y_synth_projected.insert(1, "is_synth", True)
+        X_train_aug = pd.concat([X_train_aug, X_synth_projected], axis=0, ignore_index=True)
+        y_train_aug = pd.concat([y_train_aug, y_synth_projected], axis=0, ignore_index=True)
+
+    X_train_aug = X_train_aug.sort_values("post_cleaning_index").reset_index(drop=True)
+    y_train_aug = y_train_aug.sort_values("post_cleaning_index").reset_index(drop=True)
+
+    X_train_aug.to_csv(dirs["X"] / f"{storage_name}_X_train.csv", index=False)
+    X_val.to_csv(dirs["X"] / f"{storage_name}_X_val.csv", index=False)
+    X_test.to_csv(dirs["X"] / f"{storage_name}_X_test.csv", index=False)
+
+    y_train_aug.to_csv(dirs["y"] / f"{storage_name}_y_train.csv", index=False)
+    y_val.to_csv(dirs["y"] / f"{storage_name}_y_val.csv", index=False)
+    y_test.to_csv(dirs["y"] / f"{storage_name}_y_test.csv", index=False)
+
+    r_train_aug = r_train.copy()
+    r_train_aug["is_synth"] = False
+    if len(X_synth_raw) > 0:
+        synth_removed = pd.DataFrame(columns=r_train_aug.columns)
+        synth_removed["post_cleaning_index"] = X_synth_raw["post_cleaning_index"].values
+        if "split" in synth_removed.columns:
+            synth_removed["split"] = "train"
+        if "split_id" in synth_removed.columns:
+            synth_removed["split_id"] = split_id
+        if "split_row_id" in synth_removed.columns:
+            synth_removed["split_row_id"] = [f"synth_train_flowgen_{i}" for i in range(len(synth_removed))]
+        synth_removed["is_synth"] = True
+        r_train_aug = pd.concat([r_train_aug, synth_removed], axis=0, ignore_index=True, sort=False)
+
+    r_train_aug.to_csv(dirs["removed"] / f"{storage_name}_r_train.csv", index=False)
+    r_val.to_csv(dirs["removed"] / f"{storage_name}_r_val.csv", index=False)
+    r_test.to_csv(dirs["removed"] / f"{storage_name}_r_test.csv", index=False)
+
+    copied_scalers = _copy_scaler_artifacts_to_dir(
+        source_manifest.get("scaler_artifacts", {}),
+        dst_dir=dirs["scalers"],
+    )
+
+    lineage_path = None
+    if not pool_lineage.empty:
+        lineage_df = pool_lineage.copy()
+        lineage_df["shared_pool_id"] = str(pool_manifest.get("pool_id"))
+        lineage_df["synthetic_policy_id"] = synthetic_policy_id
+        lineage_df["synthetic_policy_family"] = "flowgen"
+        lineage_df["is_synth"] = True
+        lineage_path = _write_synthetic_train_lineage(
+            lineage_df=lineage_df,
+            X_train_aug=X_train_aug,
+            y_train_aug=y_train_aug,
+            output_path=dirs["meta"] / "synthetic_train_lineage.csv",
+        )
+
+    counts_by_split, counts_by_class = counts_from_source_manifest(source_manifest)
+    counts_by_split = dict(counts_by_split)
+    counts_by_split["train"] = int(len(X_train_aug))
+    counts_by_class = dict(counts_by_class)
+    train_class_counts = X_train_aug[condition_col].astype(int).value_counts().sort_index()
+    counts_by_class["train"] = {
+        str(class_id): int(count) for class_id, count in train_class_counts.items()
+    }
+
+    source_requirements = ["official_raw_bundle", "flowgen_upstream"]
+    if str(source_axes.get("x_transform", "")).startswith("flowpre_"):
+        source_requirements.append("flowpre_upstream")
+
+    report_payload = {
+        "source_bundle_manifest_path": path_relative_to_root(_resolve_repo_path(source_bundle_manifest_path)),
+        "source_bundle_name": str(source_manifest.get("dataset_name")),
+        "shared_pool_manifest_path": path_relative_to_root(_resolve_repo_path(flowgen_pool_manifest_path)),
+        "synthetic_policy_id": synthetic_policy_id,
+        "synthetic_policy_external_name": synthetic_policy_variant,
+        "synthetic_policy_family": "flowgen",
+        "dataset_level_axes": {
+            "x_transform": str(source_axes.get("x_transform")),
+            "y_transform": str(source_axes.get("y_transform")),
+            "synthetic_policy": synthetic_policy_variant,
+        },
+        "source_requirements": source_requirements,
+        "guardrail_policy_id": pool_manifest.get("guardrail_policy_id"),
+        "guardrail_summary": pool_manifest.get("guardrail_summary"),
+        "f7_target_summary": pool_manifest.get("f7_target_summary"),
+        "class_reports": pool_manifest.get("class_reports"),
+        "f7_synthetic_cap_validation": summarize_f7_synthetic_cap(
+            train_df=X_train_aug,
+            policy=_F7_SYNTH_CAP_POLICY,
+        ),
+        "synthetic_train_lineage": None if lineage_path is None else path_relative_to_root(lineage_path),
+    }
+    dump_json(report_payload, dirs["meta"] / "flowgen_f7_report.json")
+
+    manifest = build_canonical_derived_manifest(
+        dataset_name=build_canonical_dataset_name(
+            x_transform=str(source_axes.get("x_transform")),
+            y_transform=str(source_axes.get("y_transform")),
+            synthetic_policy=synthetic_policy_variant,
+            version=DEFAULT_DATASET_CONTRACT_VERSION,
+        ),
+        dataset_level_axes={
+            "x_transform": str(source_axes.get("x_transform")),
+            "y_transform": str(source_axes.get("y_transform")),
+            "synthetic_policy": synthetic_policy_variant,
+        },
+        split_id=split_id,
+        cleaning_policy_id=str(source_manifest.get("cleaning_policy_id")),
+        source_dataset_manifest_path=source_manifest["source_dataset_manifest"],
+        source_split_manifest_path=source_manifest.get("source_split_manifest"),
+        source_cleaning_manifest_path=source_manifest.get("source_cleaning_manifest"),
+        source_manifest=source_manifest,
+        support_status="materialized_now",
+        synthetic_policy_id=synthetic_policy_id,
+        train_only_mutations=["synthetic_policy", "is_synth"],
+        artifacts={
+            "storage_name": storage_name,
+            "X": {
+                "train": dirs["X"] / f"{storage_name}_X_train.csv",
+                "val": dirs["X"] / f"{storage_name}_X_val.csv",
+                "test": dirs["X"] / f"{storage_name}_X_test.csv",
+            },
+            "y": {
+                "train": dirs["y"] / f"{storage_name}_y_train.csv",
+                "val": dirs["y"] / f"{storage_name}_y_val.csv",
+                "test": dirs["y"] / f"{storage_name}_y_test.csv",
+            },
+            "removed": {
+                "train": dirs["removed"] / f"{storage_name}_r_train.csv",
+                "val": dirs["removed"] / f"{storage_name}_r_val.csv",
+                "test": dirs["removed"] / f"{storage_name}_r_test.csv",
+            },
+        },
+        scaler_artifacts=copied_scalers,
+        upstream_model_manifests=[
+            *list(source_manifest.get("upstream_model_manifests", [])),
+            path_relative_to_root(_resolve_repo_path(pool_manifest.get("flowgen_promotion_manifest"))),
+        ],
+        extra_manifest_fields={
+            "source_bundle_manifest_path": path_relative_to_root(_resolve_repo_path(source_bundle_manifest_path)),
+            "source_bundle_name": str(source_manifest.get("dataset_name")),
+            "synthetic_policy_variant": synthetic_policy_variant,
+            "synthetic_policy_family": "flowgen",
+            "condition_col": condition_col,
+            "added_train_rows_by_class": pool_manifest.get("accepted_counts_by_class", {}),
+            "counts_by_split": counts_by_split,
+            "counts_by_class": counts_by_class,
+            "guardrail_policy_id": pool_manifest.get("guardrail_policy_id"),
+            "guardrail_summary": report_payload["guardrail_summary"],
+            "source_requirements": source_requirements,
+            "flowgen_source_id": pool_manifest.get("flowgen_source_id"),
+            "shared_pool_manifest_path": path_relative_to_root(_resolve_repo_path(flowgen_pool_manifest_path)),
+            "synthetic_train_lineage": None if lineage_path is None else path_relative_to_root(lineage_path),
+            "flowgen_f7_report": path_relative_to_root(dirs["meta"] / "flowgen_f7_report.json"),
+            "f7_synthetic_cap_validation": report_payload["f7_synthetic_cap_validation"],
+            "train_source_rows": int(len(X_train)),
+            "train_augmented_rows": int(len(X_train_aug)),
+            "generated_rows_total": int(len(X_synth_raw)),
+        },
+    )
+    dump_json(manifest, manifest_path)
+
+    if verbose:
+        rel = dirs["base"].relative_to(Path(ROOT_PATH))
+        log(f"✅ Saved F7 FlowGen augmented set from pool → {rel}", verbose)
+    return dirs["base"], manifest
+
+
+def materialize_f7_flowgen_augmented_set(
+    source_bundle_manifest_path: str | Path,
+    *,
+    flowgen_promotion_manifest_path: str | Path,
+    synthetic_policy_variant: str,
+    condition_col: str = "type",
+    force: bool = False,
+    device: str = "cpu",
+    verbose: bool = True,
+) -> tuple[Path, dict]:
+    source_manifest = _load_promotion_manifest(source_bundle_manifest_path)
+    split_id = str(source_manifest.get("split_id") or DEFAULT_OFFICIAL_SPLIT_ID)
+    consumer_dataset_id = str(source_manifest.get("dataset_name") or "bundle")
+    pool_base_dir, _ = materialize_f7_flowgen_synthetic_pool(
+        flowgen_promotion_manifest_path=flowgen_promotion_manifest_path,
+        synthetic_policy_variant=synthetic_policy_variant,
+        source_raw_bundle_manifest_path=source_manifest.get("source_dataset_manifest"),
+        consumer_dataset_ids=[consumer_dataset_id],
+        condition_col=condition_col,
+        force=force,
+        device=device,
+        verbose=verbose,
+    )
+    return materialize_f7_flowgen_augmented_set_from_pool(
+        source_bundle_manifest_path,
+        flowgen_pool_manifest_path=pool_base_dir / "meta" / "pool_manifest.json",
+        synthetic_policy_variant=synthetic_policy_variant,
+        condition_col=condition_col,
+        force=force,
+        device=device,
+        verbose=verbose,
+    )
+
+
+def materialize_f7_flowgen_augmented_sets(
+    source_bundle_manifest_paths: List[str | Path],
+    *,
+    flowgen_promotion_manifest_path: str | Path,
+    synthetic_policy_variant: str,
+    force: bool = False,
+    device: str = "cpu",
+    verbose: bool = True,
+) -> List[str]:
+    created: List[str] = []
+    for source_bundle_manifest_path in source_bundle_manifest_paths:
+        base_dir, _ = materialize_f7_flowgen_augmented_set(
+            source_bundle_manifest_path,
+            flowgen_promotion_manifest_path=flowgen_promotion_manifest_path,
+            synthetic_policy_variant=synthetic_policy_variant,
             force=force,
             device=device,
             verbose=verbose,

@@ -1,0 +1,56 @@
+seed_panel:
+  seed_set_id: "f7_seed_panel_extension3_v1"
+  panel_version: 1
+  panel_size: 30
+  construction_policy: "explicit_frozen_panel"
+  construction_note: "Tercer bloque de 30 seeds adicionales para la campaña F7, disjunto del panel base y del resto de extensiones."
+  shared_across_model_families: true
+  applies_to:
+    - "mlp"
+    - "xgboost"
+  mapping_semantics:
+    mlp:
+      campaign_seed_role: "training_replica_seed"
+      expected_bindings:
+        - "python random seed"
+        - "numpy random seed"
+        - "torch random seed"
+      note: "La seed de campaña gobierna la réplica de entrenamiento; no rematerializa datasets sintéticos F7, que ya están congelados."
+    xgboost:
+      campaign_seed_role: "booster_random_state"
+      expected_bindings:
+        - "xgboost random_state"
+        - "numpy random seed when applicable"
+      note: "La seed de campaña gobierna la réplica del booster y debe persistirse como random_state de la run."
+  dataset_materialization_note: "No aplica a la materialización de datasets F7; los datasets sintéticos ya están congelados como artefactos fijos."
+  seeds:
+    - {index: 91, value: 101224}
+    - {index: 92, value: 102335}
+    - {index: 93, value: 103446}
+    - {index: 94, value: 104557}
+    - {index: 95, value: 105668}
+    - {index: 96, value: 106779}
+    - {index: 97, value: 107890}
+    - {index: 98, value: 109001}
+    - {index: 99, value: 110112}
+    - {index: 100, value: 111223}
+    - {index: 101, value: 112334}
+    - {index: 102, value: 113445}
+    - {index: 103, value: 114556}
+    - {index: 104, value: 115667}
+    - {index: 105, value: 116778}
+    - {index: 106, value: 117889}
+    - {index: 107, value: 119000}
+    - {index: 108, value: 120111}
+    - {index: 109, value: 121222}
+    - {index: 110, value: 122333}
+    - {index: 111, value: 123444}
+    - {index: 112, value: 124555}
+    - {index: 113, value: 125666}
+    - {index: 114, value: 126777}
+    - {index: 115, value: 127888}
+    - {index: 116, value: 128999}
+    - {index: 117, value: 130110}
+    - {index: 118, value: 131221}
+    - {index: 119, value: 132332}
+    - {index: 120, value: 133443}

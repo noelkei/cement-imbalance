@@ -1,0 +1,28 @@
+seed_panel:
+  seed_set_id: "f7_seed_panel_pilot_v1"
+  panel_version: 1
+  panel_size: 1
+  construction_policy: "subset_of_f7_seed_panel_v1"
+  construction_note: "Panel piloto de una sola seed para validar la campaña F7 end-to-end antes del lanzamiento masivo."
+  shared_across_model_families: true
+  applies_to:
+    - "mlp"
+    - "xgboost"
+  mapping_semantics:
+    mlp:
+      campaign_seed_role: "training_replica_seed"
+      expected_bindings:
+        - "python random seed"
+        - "numpy random seed"
+        - "torch random seed"
+      note: "Replica piloto única para runner y artefactos F7."
+    xgboost:
+      campaign_seed_role: "booster_random_state"
+      expected_bindings:
+        - "xgboost random_state"
+        - "numpy random seed when applicable"
+      note: "Replica piloto única para runner y artefactos F7."
+  dataset_materialization_note: "No rematerializa datasets; reutiliza el inventario congelado de F7."
+  parent_seed_set_id: "f7_seed_panel_v1"
+  seeds:
+    - {index: 1, value: 1234}

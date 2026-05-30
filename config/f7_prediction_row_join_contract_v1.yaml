@@ -1,0 +1,11 @@
+prediction_row_join_contract:
+  contract_id: "f7_prediction_row_join_contract_v1"
+  contract_version: 1
+  key_kind: "post_cleaning_index_plus_split"
+  key_fields:
+    - "post_cleaning_index"
+    - "split"
+  auxiliary_fields:
+    - "type"
+    - "is_synth"
+    - "target_name"

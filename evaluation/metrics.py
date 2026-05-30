@@ -63,8 +63,14 @@ def _prepare_mlp_eval_tensors(
 
 
 def inverse_transform_tensor(tensor: torch.Tensor, scaler, *, device: torch.device) -> torch.Tensor:
+    raw_np = tensor.detach().cpu().numpy()
+    if hasattr(scaler, "feature_names_in_"):
+        feature_names = list(getattr(scaler, "feature_names_in_"))
+        restored_np = scaler.inverse_transform(pd.DataFrame(raw_np, columns=feature_names))
+    else:
+        restored_np = scaler.inverse_transform(raw_np)
     return torch.as_tensor(
-        scaler.inverse_transform(tensor.detach().cpu().numpy()),
+        restored_np,
         dtype=tensor.dtype,
         device=device,
     )

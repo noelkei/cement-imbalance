@@ -1,0 +1,56 @@
+seed_panel:
+  seed_set_id: "f7_seed_panel_extension2_v1"
+  panel_version: 1
+  panel_size: 30
+  construction_policy: "explicit_frozen_panel"
+  construction_note: "Segundo bloque de 30 seeds adicionales para la campaña F7, disjunto del panel base y del resto de extensiones."
+  shared_across_model_families: true
+  applies_to:
+    - "mlp"
+    - "xgboost"
+  mapping_semantics:
+    mlp:
+      campaign_seed_role: "training_replica_seed"
+      expected_bindings:
+        - "python random seed"
+        - "numpy random seed"
+        - "torch random seed"
+      note: "La seed de campaña gobierna la réplica de entrenamiento; no rematerializa datasets sintéticos F7, que ya están congelados."
+    xgboost:
+      campaign_seed_role: "booster_random_state"
+      expected_bindings:
+        - "xgboost random_state"
+        - "numpy random seed when applicable"
+      note: "La seed de campaña gobierna la réplica del booster y debe persistirse como random_state de la run."
+  dataset_materialization_note: "No aplica a la materialización de datasets F7; los datasets sintéticos ya están congelados como artefactos fijos."
+  seeds:
+    - {index: 61, value: 67894}
+    - {index: 62, value: 69005}
+    - {index: 63, value: 70116}
+    - {index: 64, value: 71227}
+    - {index: 65, value: 72338}
+    - {index: 66, value: 73449}
+    - {index: 67, value: 74560}
+    - {index: 68, value: 75671}
+    - {index: 69, value: 76782}
+    - {index: 70, value: 77893}
+    - {index: 71, value: 79004}
+    - {index: 72, value: 80115}
+    - {index: 73, value: 81226}
+    - {index: 74, value: 82337}
+    - {index: 75, value: 83448}
+    - {index: 76, value: 84559}
+    - {index: 77, value: 85670}
+    - {index: 78, value: 86781}
+    - {index: 79, value: 87892}
+    - {index: 80, value: 89003}
+    - {index: 81, value: 90114}
+    - {index: 82, value: 91225}
+    - {index: 83, value: 92336}
+    - {index: 84, value: 93447}
+    - {index: 85, value: 94558}
+    - {index: 86, value: 95669}
+    - {index: 87, value: 96780}
+    - {index: 88, value: 97891}
+    - {index: 89, value: 99002}
+    - {index: 90, value: 100113}

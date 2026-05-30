@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -93,10 +93,10 @@ class KMeansSmoteJointConfig:
         return cfg
 
     def validate(self) -> None:
-        if self.target_mode not in {"train_majority", "ratio_to_majority", "absolute_per_class"}:
+        if self.target_mode not in {"train_majority", "ratio_to_majority", "absolute_per_class", "f7_policy"}:
             raise ValueError(
                 f"Unsupported target_mode '{self.target_mode}'. "
-                "Use 'train_majority', 'ratio_to_majority', or 'absolute_per_class'."
+                "Use 'train_majority', 'ratio_to_majority', 'absolute_per_class', or 'f7_policy'."
             )
         if self.target_mode == "ratio_to_majority":
             if self.target_value is None or float(self.target_value) <= 0:
@@ -104,6 +104,8 @@ class KMeansSmoteJointConfig:
         if self.target_mode == "absolute_per_class":
             if self.target_value is None or int(self.target_value) <= 0:
                 raise ValueError("absolute_per_class requires target_value > 0.")
+        if self.target_mode == "f7_policy" and self.target_value is not None:
+            raise ValueError("f7_policy does not accept target_value.")
         if self.metric_space_mode not in {"robust", "standard", "none"}:
             raise ValueError(
                 f"Unsupported metric_space_mode '{self.metric_space_mode}'. "
@@ -182,13 +184,23 @@ def _fit_metric_scaler(joint_values: np.ndarray, *, mode: str):
     return scaler, normalized
 
 
-def _resolve_target_count(*, observed_count: int, majority_count: int, config: KMeansSmoteJointConfig) -> int:
+def _resolve_target_count(
+    *,
+    observed_count: int,
+    majority_count: int,
+    config: KMeansSmoteJointConfig,
+    explicit_target_count: int | None = None,
+) -> int:
+    if explicit_target_count is not None:
+        return int(explicit_target_count)
     if config.target_mode == "train_majority":
         return int(majority_count)
     if config.target_mode == "ratio_to_majority":
         return int(np.ceil(float(config.target_value) * float(majority_count)))
     if config.target_mode == "absolute_per_class":
         return int(config.target_value)
+    if config.target_mode == "f7_policy":
+        raise ValueError("f7_policy requires explicit_target_count to be provided by the caller.")
     raise ValueError(f"Unsupported target_mode '{config.target_mode}'.")
 
 
@@ -315,6 +327,60 @@ def _validate_source_frames(
         raise ValueError("kmeans_smote_joint v1 requires a non-synthetic source bundle (is_synth absent in X/y).")
 
 
+def _sample_joint_candidates_from_clusters(
+    *,
+    joint_norm: np.ndarray,
+    labels: np.ndarray,
+    eligible_cluster_ids: list[int],
+    cluster_alloc: np.ndarray,
+    class_post_cleaning_indices: np.ndarray,
+    config: KMeansSmoteJointConfig,
+    rng: np.random.Generator,
+) -> tuple[list[np.ndarray], dict[str, int], list[dict[str, Any]]]:
+    neighbor_k_by_cluster: dict[str, int] = {}
+    generated_blocks: list[np.ndarray] = []
+    lineage_records: list[dict[str, Any]] = []
+
+    for pos, cluster_id in enumerate(eligible_cluster_ids):
+        n_cluster_generate = int(cluster_alloc[pos])
+        if n_cluster_generate <= 0:
+            continue
+
+        cluster_mask = labels == int(cluster_id)
+        cluster_norm = joint_norm[cluster_mask]
+        cluster_post_cleaning_indices = class_post_cleaning_indices[cluster_mask]
+        cluster_size = int(cluster_norm.shape[0])
+        neighbor_k = _resolve_neighbor_k(cluster_size=cluster_size, config=config)
+        neighbor_k_by_cluster[str(cluster_id)] = int(neighbor_k)
+
+        nn = NearestNeighbors(n_neighbors=int(neighbor_k) + 1, metric="euclidean")
+        nn.fit(cluster_norm)
+        neighbor_indices = nn.kneighbors(cluster_norm, return_distance=False)
+
+        for _ in range(n_cluster_generate):
+            anchor_pos = int(rng.integers(0, cluster_size))
+            anchor = cluster_norm[anchor_pos]
+            candidates = [int(idx) for idx in neighbor_indices[anchor_pos].tolist() if int(idx) != anchor_pos]
+            if not candidates:
+                raise RuntimeError(
+                    f"Cluster={cluster_id} has no valid neighbors for anchor={anchor_pos}."
+                )
+            neighbor_pos = int(rng.choice(candidates))
+            lam = float(rng.random())
+            synth_norm = anchor + lam * (cluster_norm[neighbor_pos] - anchor)
+            generated_blocks.append(np.asarray(synth_norm, dtype=np.float64))
+            lineage_records.append(
+                {
+                    "source_class": int(cluster_id),
+                    "cluster_id": int(cluster_id),
+                    "anchor_post_cleaning_index": int(cluster_post_cleaning_indices[anchor_pos]),
+                    "neighbor_post_cleaning_index": int(cluster_post_cleaning_indices[neighbor_pos]),
+                    "interpolation_lambda": float(lam),
+                }
+            )
+    return generated_blocks, neighbor_k_by_cluster, lineage_records
+
+
 def generate_kmeans_smote_joint_samples(
     X_train: pd.DataFrame,
     y_train: pd.DataFrame,
@@ -323,6 +389,9 @@ def generate_kmeans_smote_joint_samples(
     condition_col: str = "type",
     config: KMeansSmoteJointConfig,
     condition_value_to_label_map: Mapping[int, str] | None = None,
+    explicit_target_count_by_class: Mapping[int | str, int] | None = None,
+    candidate_validator: Callable[..., tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]] | None = None,
+    max_attempt_batches_per_class: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     _validate_source_frames(X_train, y_train, condition_col=condition_col)
 
@@ -363,20 +432,30 @@ def generate_kmeans_smote_joint_samples(
     next_index = int(X_train["post_cleaning_index"].max()) + 1
     synth_x_parts: list[pd.DataFrame] = []
     synth_y_parts: list[pd.DataFrame] = []
+    lineage_parts: list[pd.DataFrame] = []
     class_reports: dict[str, Any] = {}
 
     for cls in class_values:
         class_label = label_map[int(cls)]
         class_df = merged[merged[condition_col].astype(int) == int(cls)].copy()
         observed_count = int(len(class_df))
+        explicit_target = None
+        if explicit_target_count_by_class is not None:
+            explicit_target = (
+                explicit_target_count_by_class.get(int(cls))
+                if int(cls) in explicit_target_count_by_class
+                else explicit_target_count_by_class.get(str(class_label))
+            )
         target_count = _resolve_target_count(
             observed_count=observed_count,
             majority_count=majority,
             config=config,
+            explicit_target_count=None if explicit_target is None else int(explicit_target),
         )
         n_to_generate = max(0, int(target_count) - int(observed_count))
 
         joint_values = class_df[x_cols + y_cols].to_numpy(dtype=np.float64, copy=True)
+        class_post_cleaning_indices = class_df["post_cleaning_index"].to_numpy(dtype=int, copy=True)
         scaler, joint_norm = _fit_metric_scaler(joint_values, mode=config.metric_space_mode)
         k_selected, silhouette_report, fallback_reason = _evaluate_k_grid(
             joint_norm,
@@ -422,36 +501,42 @@ def generate_kmeans_smote_joint_samples(
         }
 
         neighbor_k_by_cluster: dict[str, int] = {}
-        generated_blocks: list[np.ndarray] = []
-        for pos, cluster_id in enumerate(eligible_cluster_ids):
-            n_cluster_generate = int(cluster_alloc[pos])
-            if n_cluster_generate <= 0:
-                continue
+        accepted_x_class_parts: list[pd.DataFrame] = []
+        accepted_y_class_parts: list[pd.DataFrame] = []
+        generated_count = 0
+        attempt_batches = 0
+        rejected_count_total = 0
+        reject_counts_by_reason: dict[str, int] = {}
+        soft_audit_counts: dict[str, int] = {}
 
-            cluster_mask = labels == int(cluster_id)
-            cluster_norm = joint_norm[cluster_mask]
-            cluster_size = int(cluster_norm.shape[0])
-            neighbor_k = _resolve_neighbor_k(cluster_size=cluster_size, config=config)
-            neighbor_k_by_cluster[str(cluster_id)] = int(neighbor_k)
+        while generated_count < n_to_generate:
+            attempt_batches += 1
+            if attempt_batches > int(max_attempt_batches_per_class):
+                raise RuntimeError(
+                    f"Class={class_label} could not meet synthetic target after "
+                    f"{max_attempt_batches_per_class} attempt batches. "
+                    f"Accepted={generated_count}, target={n_to_generate}."
+                )
 
-            nn = NearestNeighbors(n_neighbors=int(neighbor_k) + 1, metric="euclidean")
-            nn.fit(cluster_norm)
-            neighbor_indices = nn.kneighbors(cluster_norm, return_distance=False)
+            remaining = int(n_to_generate - generated_count)
+            batch_cluster_alloc = (
+                _allocate_integer_counts(eligible_sizes / eligible_sizes.sum(), remaining)
+                if eligible_sizes.size > 0 and remaining > 0
+                else np.zeros(len(eligible_cluster_ids), dtype=int)
+            )
+            generated_blocks, neighbor_k_batch, batch_lineage = _sample_joint_candidates_from_clusters(
+                joint_norm=joint_norm,
+                labels=labels,
+                eligible_cluster_ids=eligible_cluster_ids,
+                cluster_alloc=batch_cluster_alloc,
+                class_post_cleaning_indices=class_post_cleaning_indices,
+                config=config,
+                rng=rng,
+            )
+            neighbor_k_by_cluster.update(neighbor_k_batch)
+            if not generated_blocks:
+                break
 
-            for _ in range(n_cluster_generate):
-                anchor_pos = int(rng.integers(0, cluster_size))
-                anchor = cluster_norm[anchor_pos]
-                candidates = [int(idx) for idx in neighbor_indices[anchor_pos].tolist() if int(idx) != anchor_pos]
-                if not candidates:
-                    raise RuntimeError(
-                        f"Class={class_label}, cluster={cluster_id} has no valid neighbors for anchor={anchor_pos}."
-                    )
-                neighbor_pos = int(rng.choice(candidates))
-                lam = float(rng.random())
-                synth_norm = anchor + lam * (cluster_norm[neighbor_pos] - anchor)
-                generated_blocks.append(np.asarray(synth_norm, dtype=np.float64))
-
-        if generated_blocks:
             generated_norm = np.vstack(generated_blocks)
             generated_values = (
                 scaler.inverse_transform(generated_norm)
@@ -464,15 +549,59 @@ def generate_kmeans_smote_joint_samples(
             idx_block = np.arange(next_index, next_index + len(generated_values), dtype=int)
             next_index += len(generated_values)
 
-            X_syn = pd.DataFrame(generated_values[:, : len(x_cols)], columns=x_cols)
-            X_syn.insert(0, condition_col, int(cls))
-            X_syn.insert(0, "post_cleaning_index", idx_block)
+            X_syn_batch = pd.DataFrame(generated_values[:, : len(x_cols)], columns=x_cols)
+            X_syn_batch.insert(0, condition_col, int(cls))
+            X_syn_batch.insert(0, "post_cleaning_index", idx_block)
 
-            y_syn = pd.DataFrame(generated_values[:, len(x_cols):], columns=y_cols)
-            y_syn.insert(0, "post_cleaning_index", idx_block)
+            y_syn_batch = pd.DataFrame(generated_values[:, len(x_cols):], columns=y_cols)
+            y_syn_batch.insert(0, "post_cleaning_index", idx_block)
 
-            synth_x_parts.append(X_syn)
-            synth_y_parts.append(y_syn)
+            generated_lineage = pd.DataFrame(batch_lineage)
+            if not generated_lineage.empty:
+                generated_lineage["post_cleaning_index"] = idx_block
+                generated_lineage["type"] = int(cls)
+                generated_lineage["synthetic_seed"] = int(config.synthetic_seed)
+                generated_lineage["attempt_idx"] = int(attempt_batches)
+                generated_lineage["source_class"] = int(cls)
+
+            if candidate_validator is None:
+                accepted_x = X_syn_batch
+                accepted_y = y_syn_batch
+                batch_summary = {
+                    "accepted_count": int(len(X_syn_batch)),
+                    "rejected_count": 0,
+                    "reject_counts_by_reason": {},
+                    "soft_audit_summary": {"counts": {}},
+                }
+            else:
+                accepted_x, accepted_y, batch_summary = candidate_validator(
+                    X_syn_batch,
+                    y_syn_batch,
+                    class_value=int(cls),
+                    class_label=class_label,
+                    attempt_idx=int(attempt_batches),
+                )
+
+            if len(accepted_x) > 0:
+                accepted_x_class_parts.append(accepted_x)
+                accepted_y_class_parts.append(accepted_y)
+                generated_count += int(len(accepted_x))
+                if not generated_lineage.empty:
+                    accepted_indices = accepted_x["post_cleaning_index"].astype(int).tolist()
+                    accepted_lineage = generated_lineage[
+                        generated_lineage["post_cleaning_index"].astype(int).isin(accepted_indices)
+                    ].copy()
+                    lineage_parts.append(accepted_lineage)
+            rejected_count_total += int(batch_summary.get("rejected_count", 0))
+            for reason, count in dict(batch_summary.get("reject_counts_by_reason") or {}).items():
+                reject_counts_by_reason[str(reason)] = int(reject_counts_by_reason.get(str(reason), 0)) + int(count)
+            audit_counts = dict((batch_summary.get("soft_audit_summary") or {}).get("counts") or {})
+            for rule_name, count in audit_counts.items():
+                soft_audit_counts[str(rule_name)] = int(soft_audit_counts.get(str(rule_name), 0)) + int(count)
+
+        if accepted_x_class_parts:
+            synth_x_parts.append(pd.concat(accepted_x_class_parts, axis=0, ignore_index=True))
+            synth_y_parts.append(pd.concat(accepted_y_class_parts, axis=0, ignore_index=True))
 
         class_reports[class_label] = {
             "class_id": int(cls),
@@ -488,7 +617,12 @@ def generate_kmeans_smote_joint_samples(
             "eligible_cluster_ids": [int(cluster_id) for cluster_id in eligible_cluster_ids],
             "allocated_by_cluster": allocated_by_cluster,
             "neighbor_k_by_cluster": neighbor_k_by_cluster,
-            "generated_count": int(n_to_generate),
+            "generated_count": int(generated_count),
+            "target_synth_rows": int(n_to_generate),
+            "attempt_batches": int(attempt_batches),
+            "rejected_count_total": int(rejected_count_total),
+            "reject_counts_by_reason": reject_counts_by_reason,
+            "soft_audit_counts": soft_audit_counts,
         }
 
     if synth_x_parts:
@@ -498,13 +632,20 @@ def generate_kmeans_smote_joint_samples(
         X_synth = X_train.iloc[0:0].copy()
         y_synth = y_train.iloc[0:0].copy()
 
+    if lineage_parts:
+        lineage_df = pd.concat(lineage_parts, axis=0, ignore_index=True)
+        lineage_df = lineage_df.sort_values("post_cleaning_index").reset_index(drop=True)
+        lineage_records = lineage_df.to_dict(orient="records")
+    else:
+        lineage_records = []
+
     report = {
         "synthetic_policy_family": "kmeans_smote_joint",
         "synthetic_seed": int(config.synthetic_seed),
         "synthetic_policy_config_id": config.synthetic_policy_config_id,
         "metric_space_mode": config.metric_space_mode,
-        "target_mode": config.target_mode,
-        "target_value": config.target_value,
+        "target_mode": "f7_policy" if explicit_target_count_by_class is not None else config.target_mode,
+        "target_value": None if explicit_target_count_by_class is not None else config.target_value,
         "majority_count": int(majority),
         "x_cols": list(x_cols),
         "y_cols": list(y_cols),
@@ -532,6 +673,7 @@ def generate_kmeans_smote_joint_samples(
             for class_label, payload in class_reports.items()
         },
         "cluster_min_size": int(config.min_cluster_size),
+        "synthetic_train_lineage": lineage_records,
     }
     return X_synth, y_synth, report
 
@@ -550,6 +692,9 @@ def augment_canonical_bundle_with_kmeans_smote(
     config: KMeansSmoteJointConfig,
     condition_col: str = "type",
     condition_value_to_label_map: Mapping[int, str] | None = None,
+    explicit_target_count_by_class: Mapping[int | str, int] | None = None,
+    candidate_validator: Callable[..., tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]] | None = None,
+    max_attempt_batches_per_class: int = 1,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     X_synth, y_synth, report = generate_kmeans_smote_joint_samples(
         X_train=X_train,
@@ -558,6 +703,9 @@ def augment_canonical_bundle_with_kmeans_smote(
         condition_col=condition_col,
         config=config,
         condition_value_to_label_map=condition_value_to_label_map,
+        explicit_target_count_by_class=explicit_target_count_by_class,
+        candidate_validator=candidate_validator,
+        max_attempt_batches_per_class=max_attempt_batches_per_class,
     )
 
     X_train_aug = X_train.copy()

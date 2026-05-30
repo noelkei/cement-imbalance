@@ -1,0 +1,9 @@
+target_contract:
+  contract_id: "f7_target_contract_v1"
+  contract_version: 1
+  target_name: "init"
+  target_space_id: "raw_real"
+  target_unit_public: "anonymized_target_unit"
+  comparison_value_space: "raw_real"
+  prediction_target_names:
+    - "init"

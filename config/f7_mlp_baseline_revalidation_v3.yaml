@@ -1,0 +1,503 @@
+study:
+  study_id: "f7_mlp_baseline_revalidation_v3"
+  description: "Tercera y ultima revalidacion 3x40 del baseline MLP para F7"
+
+dataset:
+  scaled_set_name: "df_scaled_xstandard_yminmax"
+  dataset_name: "dataset__x-standard__y-minmax__syn-none__v1"
+  dataset_manifest_path: "data/sets/official/init_temporal_processed_v1/scaled/df_scaled_xstandard_yminmax/meta/manifest.json"
+  split_id: "init_temporal_processed_v1"
+  condition_col: "type"
+  dataset_level_axes:
+    x_transform: "standard"
+    y_transform: "minmax"
+    synthetic_policy: "none"
+
+protocol:
+  base_config_path: "config/mlp_closure_base_v1.yaml"
+  objective_metric_id: "raw_real.macro.rrmse"
+  objective_metric_path: "macro.rrmse"
+  fixed_overrides:
+    contract.seed_set_id: "f7_mlp_reval5_v1"
+    contract.objective_metric_id: "raw_real.macro.rrmse"
+    training.batch_size: 198
+    training.num_epochs: 300
+    training.learning_rate: 0.0001
+    training.loss_reduction: "overall"
+    training.regression_group_metric: "rmse"
+    training.dataloader_mode: "baseline"
+    training.cycle_reals: false
+    training.allow_synth: true
+    training.save_model: false
+    training.save_states: false
+    training.save_results: true
+    training.log_training: false
+    interpretability.compute_shap: false
+    interpretability.save_influence: false
+  family_keys:
+    - "training.batch_size"
+    - "training.num_epochs"
+    - "training.learning_rate"
+    - "training.early_stopping_patience"
+    - "training.lr_decay_patience"
+    - "training.lr_scheduler"
+    - "model.hidden_dim"
+    - "model.num_layers"
+    - "model.embedding_dim"
+  run_level_keys:
+    - "training.loss_reduction"
+    - "training.regression_group_metric"
+    - "training.dataloader_mode"
+    - "training.cycle_reals"
+  seeds:
+    seed_set_id: "f7_mlp_reval5_v1"
+    values: [1234, 2345, 3456]
+  test_policy:
+    use_test_for_selection: false
+    winner_check: "single_winner_only"
+  runtime_target:
+    preferred_mean_runtime_s_max: 5.0
+
+variants:
+  - cfg_id: "hd256_l3"
+    rationale: "Referencia barata de tres capas en la zona media."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l4"
+    rationale: "Referencia fuerte y barata ya conocida de la v2."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l5"
+    rationale: "Profundidad intermedia nueva para ver si cinco capas mejora sin irse al coste de seis."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 5
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd256_l6"
+    rationale: "Control de seis capas en anchura media."
+    params:
+      model.hidden_dim: 256
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd320_l3"
+    rationale: "Anchura intermedia nueva con tres capas."
+    params:
+      model.hidden_dim: 320
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd320_l4"
+    rationale: "Candidata nueva de compromiso entre 256x4 y 384x4."
+    params:
+      model.hidden_dim: 320
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd320_l5"
+    rationale: "Cinco capas con anchura 320 para comprobar si el punto dulce esta entre 4 y 6."
+    params:
+      model.hidden_dim: 320
+      model.num_layers: 5
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd320_l6"
+    rationale: "Versión mas profunda de la familia 320."
+    params:
+      model.hidden_dim: 320
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l3"
+    rationale: "Candidata muy barata y fuerte de la v2."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l4"
+    rationale: "Candidata fuerte y defendible de la v2."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l5"
+    rationale: "Cinco capas nuevas para ver si mejora sin llegar al coste completo de 384x6."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 5
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd384_l6"
+    rationale: "Familia profunda fuerte de la v2 para recontrastar."
+    params:
+      model.hidden_dim: 384
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd448_l3"
+    rationale: "Anchura alta nueva con tres capas."
+    params:
+      model.hidden_dim: 448
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd448_l4"
+    rationale: "Candidata alta nueva justo por debajo de 512x4."
+    params:
+      model.hidden_dim: 448
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd448_l5"
+    rationale: "Chequeo intermedio entre 384x5 y 512x5."
+    params:
+      model.hidden_dim: 448
+      model.num_layers: 5
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd512_l3"
+    rationale: "Anchura maxima con tres capas para medir si la profundidad es realmente necesaria."
+    params:
+      model.hidden_dim: 512
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd512_l4"
+    rationale: "Candidata alta barata ya conocida de la v2."
+    params:
+      model.hidden_dim: 512
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd512_l5"
+    rationale: "Cinco capas nuevas para ver si capta parte de la ventaja de 512x6 sin pasar tanto del target de runtime."
+    params:
+      model.hidden_dim: 512
+      model.num_layers: 5
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd512_l6"
+    rationale: "Ganadora estructural pura de la v2; se revalida explicitamente por posible sensibilidad a policy/loss."
+    params:
+      model.hidden_dim: 512
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "hd320_l4_lr5e5_pat30_lrp15"
+    rationale: "Chequeo fino de optimizacion sobre una familia nueva candidata de coste contenido."
+    params:
+      training.learning_rate: 0.00005
+      training.early_stopping_patience: 30
+      training.lr_decay_patience: 15
+      model.hidden_dim: 320
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd256_l4"
+    rationale: "Chequeo pce+rmse en plain sobre la referencia media."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd256_l4"
+    rationale: "Chequeo pce+rmse aware sobre la referencia media."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd320_l4"
+    rationale: "Chequeo pce+rmse plain sobre la nueva familia 320x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 320
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd320_l4"
+    rationale: "Chequeo pce+rmse aware sobre la nueva familia 320x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 320
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd384_l4"
+    rationale: "Chequeo pce+rmse plain sobre la candidata fuerte y barata."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd384_l4"
+    rationale: "Chequeo pce+rmse aware sobre la candidata fuerte y barata."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd512_l4"
+    rationale: "Chequeo pce+rmse plain sobre la familia 512x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 512
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd512_l4"
+    rationale: "Chequeo pce+rmse aware sobre la familia 512x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 512
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_hd512_l6"
+    rationale: "Chequeo pce+rmse plain sobre la ganadora estructural pura de la v2."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 512
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_hd512_l6"
+    rationale: "Chequeo pce+rmse aware sobre la ganadora estructural pura de la v2."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 512
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd256_l4"
+    rationale: "Chequeo pce+rrmse plain sobre la referencia media."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd256_l4"
+    rationale: "Chequeo pce+rrmse aware sobre la referencia media."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd320_l4"
+    rationale: "Chequeo pce+rrmse plain sobre la nueva familia 320x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 320
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd320_l4"
+    rationale: "Chequeo pce+rrmse aware sobre la nueva familia 320x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 320
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd384_l4"
+    rationale: "Chequeo pce+rrmse plain sobre la candidata fuerte y barata."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd384_l4"
+    rationale: "Chequeo pce+rrmse aware sobre la candidata fuerte y barata."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 384
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd512_l4"
+    rationale: "Chequeo pce+rrmse plain sobre la familia 512x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 512
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd512_l4"
+    rationale: "Chequeo pce+rrmse aware sobre la familia 512x4."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 512
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_hd512_l6"
+    rationale: "Chequeo pce+rrmse plain sobre la ganadora estructural pura de la v2."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      model.hidden_dim: 512
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_hd512_l6"
+    rationale: "Chequeo pce+rrmse aware sobre la ganadora estructural pura de la v2."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      model.hidden_dim: 512
+      model.num_layers: 6
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true

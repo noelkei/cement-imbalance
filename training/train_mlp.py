@@ -1,5 +1,5 @@
 # train_mlp.py
-import os, math, json, shutil, random, secrets
+import os, math, json, shutil, random, secrets, time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional, Tuple, List, Dict, Union, Literal
@@ -16,6 +16,7 @@ from training.utils import (
     flowpre_log,
     setup_training_logs_and_dirs,
     log_epoch_diagnostics,
+    select_training_device,
 )
 from data.sets import (
     DEFAULT_OFFICIAL_DATASET_NAME,
@@ -30,8 +31,61 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from evaluation.metrics import compute_mlp_metrics
+from evaluation.predictive_metrics import (
+    build_predictive_metric_spaces,
+    build_predictive_results_payload,
+)
+from evaluation.artifacts import (
+    build_artifact_index_payload,
+    build_prediction_sidecar_payload_from_native,
+    uses_f7_stable_single_copy_policy,
+    write_prediction_sidecar,
+)
+from evaluation.mlp_interpretability import compute_and_persist_mlp_interpretability
+from evaluation.raw_metric_contract import (
+    build_raw_inversion_status,
+    validate_raw_metric_contract,
+)
 from evaluation.results import build_run_context, save_canonical_run_artifacts
+
+
+def _resolve_mlp_run_dir(
+    *,
+    base_name: str,
+    config_filename: str | Path,
+    config: dict[str, Any],
+    run_id: str | None,
+    run_dir: str | Path | None,
+    verbose: bool,
+) -> tuple[Path, str, Path | None, Path | None]:
+    if run_dir is not None:
+        resolved_run_dir = Path(run_dir)
+        resolved_run_id = str(run_id or resolved_run_dir.name)
+        versioned_dir, versioned_name, log_file_path, snapshots_dir = setup_training_logs_and_dirs(
+            base_name,
+            str(config_filename),
+            dict(config),
+            verbose,
+            should_save_states=bool(dict(config).get("training", {}).get("save_states", False)),
+            log_training=bool(dict(config).get("training", {}).get("log_training", True)),
+            subdir="mlp",
+            fixed_run_id=resolved_run_id,
+            log_in_run_dir=True,
+            absolute_run_dir=resolved_run_dir,
+        )
+        return versioned_dir, versioned_name, Path(log_file_path) if log_file_path else None, snapshots_dir
+
+    versioned_dir, versioned_name, log_file_path, snapshots_dir = setup_training_logs_and_dirs(
+        base_name,
+        str(config_filename),
+        dict(config),
+        verbose,
+        bool(dict(config).get("training", {}).get("save_states", False)),
+        bool(dict(config).get("training", {}).get("log_training", True)),
+        subdir="mlp",
+    )
+    return versioned_dir, versioned_name, Path(log_file_path) if log_file_path else None, snapshots_dir
+
 
 class BalancedBatchSampler(torch.utils.data.Sampler):
     """
@@ -608,6 +662,8 @@ def train_mlp_model(
     seed: int | None = None,
     config_filename: str = "mlp.yaml",
     base_name: str = "mlp",
+    run_id: str | None = None,
+    run_dir: str | Path | None = None,
     device: str = "cuda",
     verbose: bool = True,
     evaluation_context: Optional[Dict[str, Any]] = None,
@@ -640,12 +696,16 @@ def train_mlp_model(
     interp_cfg = config.get("interpretability", {})
     contract_cfg = config.get("contract", {})
 
-    dev = torch.device("cuda" if device.lower() == "cuda" and torch.cuda.is_available() else "cpu")
+    dev = select_training_device(device)
 
     # -------------------- Logging dirs --------------------
-    versioned_dir, versioned_name, log_file_path, snapshots_dir = setup_training_logs_and_dirs(
-        base_name, config_filename, config, verbose, train_cfg.get("save_states", False),
-        train_cfg.get("log_training", True), subdir="mlp",
+    versioned_dir, versioned_name, log_file_path, snapshots_dir = _resolve_mlp_run_dir(
+        base_name=base_name,
+        config_filename=config_filename,
+        config=config,
+        run_id=run_id,
+        run_dir=run_dir,
+        verbose=verbose,
     )
 
     # -------------------- Data --------------------
@@ -765,9 +825,12 @@ def train_mlp_model(
         raise ValueError(f"Unsupported regression_group_metric '{reg_group_metric}'. Use 'mse' | 'rmse' | 'rrmse'.")
 
     # -------------------- Train loop --------------------
+    train_started_at = time.perf_counter()
     best_val = float("inf")
     best_state = deepcopy(model.state_dict())
     best_epoch = None
+    epochs_ran = 0
+    stopped_early = False
 
     early_stopping_patience = int(train_cfg.get("early_stopping_patience", 30))
     total_epochs = int(train_cfg["num_epochs"])
@@ -795,6 +858,7 @@ def train_mlp_model(
     flowpre_log(f"🎲 Using seed: {seed}", filename_or_path=log_file_path, verbose=verbose)
 
     for epoch in range(total_epochs):
+        epochs_ran = epoch + 1
         model.train()
         total_loss = 0.0
         diag_accum = {}
@@ -855,6 +919,7 @@ def train_mlp_model(
 
         # early stopping
         if epochs_no_improve >= early_stopping_patience:
+            stopped_early = True
             flowpre_log(f"🛌 Early stopping at epoch {epoch + 1}",
                         filename_or_path=log_file_path, verbose=verbose)
             break
@@ -866,11 +931,27 @@ def train_mlp_model(
             filename_or_path=log_file_path, verbose=verbose
         )
 
+    training_runtime_s = round(time.perf_counter() - train_started_at, 3)
+
     # Load best
     model.load_state_dict(best_state)
 
     eval_ctx = dict(evaluation_context or {})
     y_scaler = eval_ctx.get("y_scaler")
+    dataset_manifest_path = eval_ctx.get("dataset_manifest_path", official_raw_bundle_manifest_path())
+    dataset_manifest_payload = {}
+    try:
+        manifest_path_obj = Path(dataset_manifest_path)
+        if not manifest_path_obj.is_absolute():
+            manifest_path_obj = ROOT_PATH / manifest_path_obj
+        if manifest_path_obj.exists():
+            dataset_manifest_payload = json.loads(manifest_path_obj.read_text(encoding="utf-8"))
+    except Exception:
+        dataset_manifest_payload = {}
+    dataset_level_axes = dict(eval_ctx.get("dataset_level_axes") or dataset_manifest_payload.get("dataset_level_axes") or {})
+    resolved_y_transform = str(eval_ctx.get("y_transform") or dataset_level_axes.get("y_transform") or "raw")
+    scaler_artifacts = dict(dataset_manifest_payload.get("scaler_artifacts") or {})
+    target_scaler_artifact = eval_ctx.get("target_scaler_artifact") or scaler_artifacts.get("y")
 
     def _split_frames(df: pd.DataFrame | None) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
         if df is None:
@@ -886,55 +967,75 @@ def train_mlp_model(
     X_val_eval, y_val_eval = _split_frames(cXy_val)
     X_test_eval, y_test_eval = _split_frames(cXy_test if allow_test_holdout else None)
 
-    train_metrics = compute_mlp_metrics(
-        model=model,
-        X=X_train_eval,
-        y=y_train_eval,
-        condition_col=condition_col,
-    )
-    val_metrics = compute_mlp_metrics(
-        model=model,
-        X=X_val_eval,
-        y=y_val_eval,
-        condition_col=condition_col,
-    )
-    test_metrics = (
-        compute_mlp_metrics(
-            model=model,
-            X=X_test_eval,
-            y=y_test_eval,
-            condition_col=condition_col,
-        )
-        if X_test_eval is not None and y_test_eval is not None
-        else None
-    )
+    def _frames_to_eval_arrays(
+        X_df: pd.DataFrame | None,
+        y_df: pd.DataFrame | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if X_df is None or y_df is None:
+            return None
+        drop_cols = ["post_cleaning_index", condition_col]
+        if "is_synth" in X_df.columns:
+            drop_cols.append("is_synth")
+        x_np = X_df.drop(columns=drop_cols).to_numpy(dtype=np.float32)
+        c_np = X_df[condition_col].to_numpy(dtype=np.int64)
+        y_np = y_df.drop(columns=["post_cleaning_index"]).to_numpy(dtype=np.float32)
+        return x_np, y_np, c_np
 
-    raw_real_metrics = None
-    if y_scaler is not None:
-        raw_real_metrics = {
-            "train": compute_mlp_metrics(
-                model=model,
-                X=X_train_eval,
-                y=y_train_eval,
-                condition_col=condition_col,
-                y_scaler=y_scaler,
-            ),
-            "val": compute_mlp_metrics(
-                model=model,
-                X=X_val_eval,
-                y=y_val_eval,
-                condition_col=condition_col,
-                y_scaler=y_scaler,
-            ),
-        }
-        if X_test_eval is not None and y_test_eval is not None:
-            raw_real_metrics["test"] = compute_mlp_metrics(
-                model=model,
-                X=X_test_eval,
-                y=y_test_eval,
-                condition_col=condition_col,
-                y_scaler=y_scaler,
-            )
+    def _predict_split(frame_pair: tuple[np.ndarray, np.ndarray, np.ndarray] | None) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if frame_pair is None:
+            return None
+        x_np, y_np, c_np = frame_pair
+        x_tensor = torch.as_tensor(x_np, dtype=torch.float32, device=dev)
+        c_tensor = torch.as_tensor(c_np, dtype=torch.long, device=dev)
+        with torch.no_grad():
+            y_hat = model(x_tensor, c_tensor).detach().cpu().numpy()
+        return y_hat, y_np, c_np
+
+    split_arrays = {
+        "train": _frames_to_eval_arrays(X_train_eval, y_train_eval),
+        "val": _frames_to_eval_arrays(X_val_eval, y_val_eval),
+        "test": _frames_to_eval_arrays(X_test_eval, y_test_eval) if allow_test_holdout else None,
+    }
+    predicted_splits = {
+        split: _predict_split(arrays)
+        for split, arrays in split_arrays.items()
+        if arrays is not None
+    }
+    predictions_by_split = {split: payload[0] for split, payload in predicted_splits.items()}
+    targets_by_split = {split: payload[1] for split, payload in predicted_splits.items()}
+    class_codes_by_split = {split: payload[2] for split, payload in predicted_splits.items()}
+
+    metric_spaces = build_predictive_metric_spaces(
+        predictions_by_split=predictions_by_split,
+        targets_by_split=targets_by_split,
+        class_codes_by_split=class_codes_by_split,
+        native_enabled=True,
+        raw_real_required=True,
+        raw_real_from_native_when_no_scaler=True,
+        y_scaler=y_scaler,
+        device=dev,
+    )
+    train_metrics = metric_spaces["native"]["train"]
+    val_metrics = metric_spaces["native"]["val"]
+    test_metrics = metric_spaces["native"].get("test")
+    raw_real_metrics = metric_spaces.get("raw_real")
+    raw_inversion_status = build_raw_inversion_status(
+        y_transform=resolved_y_transform,
+        y_scaler_present=bool(y_scaler is not None),
+        target_scaler_artifact=str(target_scaler_artifact) if target_scaler_artifact is not None else None,
+        raw_real_available=bool(raw_real_metrics),
+    )
+    raw_metric_contract_validation = validate_raw_metric_contract(
+        metric_spaces=metric_spaces,
+        test_enabled=bool(test_metrics is not None and allow_test_holdout),
+        raw_inversion_status=raw_inversion_status,
+        value_space_default="raw_real" if raw_real_metrics else "native",
+    )
+    if not raw_metric_contract_validation["campaign_valid"]:
+        raise ValueError(
+            "F7 raw metric contract validation failed: "
+            + ", ".join(str(item) for item in raw_metric_contract_validation["missing_items"])
+        )
 
     objective_metric_id = str(
         eval_ctx.get(
@@ -967,6 +1068,52 @@ def train_mlp_model(
             objective_metric_id=objective_metric_id,
         ),
     }
+    training_summary = {
+        "status": "completed",
+        "device": str(dev),
+        "runtime_s": training_runtime_s,
+        "epochs_ran": int(epochs_ran),
+        "epochs_planned": int(total_epochs),
+        "best_epoch": None if best_epoch is None else int(best_epoch),
+        "stopped_early": bool(stopped_early),
+        "early_stopping_patience": int(early_stopping_patience),
+    }
+    f7_interpretability_required = str(comparison_contract["contract_id"]) == "f7_contract_v1"
+    mlp_interpretability_bundle = None
+    mlp_interpretability_summary = None
+    mlp_interpretability_validation = None
+    campaign_valid_interpretability = not f7_interpretability_required
+    campaign_valid_f7 = bool(raw_metric_contract_validation["campaign_valid"]) and bool(campaign_valid_interpretability)
+    if f7_interpretability_required:
+        mlp_interpretability_bundle = compute_and_persist_mlp_interpretability(
+            model=model,
+            device=dev,
+            out_dir=versioned_dir,
+            dataset_manifest_payload=dataset_manifest_payload,
+            dataset_level_axes=comparison_contract["dataset_level_axes"] or dataset_level_axes,
+            feature_names=list(feature_names_x),
+            x_train=split_arrays["train"][0],
+            c_train=split_arrays["train"][2],
+            split_arrays=split_arrays,
+            predictions_by_split=predictions_by_split,
+            y_scaler=y_scaler,
+            target_names=list(target_names),
+            run_mode=raw_metric_contract_validation["run_mode"],
+            projection_cache_root=eval_ctx.get("flowpre_projection_cache_root"),
+        )
+        mlp_interpretability_summary = dict(mlp_interpretability_bundle["summary"])
+        mlp_interpretability_validation = dict(mlp_interpretability_bundle["validation"])
+        campaign_valid_interpretability = bool(
+            mlp_interpretability_validation["campaign_valid_interpretability"]
+        )
+        campaign_valid_f7 = bool(raw_metric_contract_validation["campaign_valid"]) and bool(
+            campaign_valid_interpretability
+        )
+        if not campaign_valid_interpretability:
+            raise ValueError(
+                "F7 MLP interpretability contract validation failed: "
+                + ", ".join(str(item) for item in mlp_interpretability_validation["missing_items"])
+            )
 
     tm, vm = train_metrics["overall"], val_metrics["overall"]
     flowpre_log(
@@ -1027,45 +1174,80 @@ def train_mlp_model(
             filename_or_path=log_file_path, verbose=verbose
         )
 
+    resolved_cfg_path = Path(config_filename)
+    if not resolved_cfg_path.is_absolute():
+        resolved_cfg_path = ROOT_PATH / "config" / resolved_cfg_path
+
     # ── Save results
     if bool(train_cfg.get("save_results", False)):
+        analysis_contracts = dict(eval_ctx.get("analysis_contracts") or {})
+        use_stable_single_copy = uses_f7_stable_single_copy_policy(analysis_contracts)
         results = {
             "seed": seed,
             "best_epoch": best_epoch,
+            "epochs_ran": int(epochs_ran),
+            "epochs_planned": int(total_epochs),
+            "stopped_early": bool(stopped_early),
+            "runtime_s": training_runtime_s,
+            "device": str(dev),
             "val_best_loss": round(best_val, 6),
-            "train": train_metrics,
-            "val": val_metrics,
-            "raw_real": raw_real_metrics,
-            "metric_spaces": {
-                "default": "raw_real" if raw_real_metrics is not None else "native",
-                "available": ["native"] + (["raw_real"] if raw_real_metrics is not None else []),
-            },
             "loss_reduction": reduction_mode,
             "regression_group_metric": reg_group_metric,
             "task": task,
             "feature_names_x": feature_names_x,
             "target_names": target_names,
             "shap": shap_results,
+            "training_summary": training_summary,
             "comparison_contract": comparison_contract,
+            "mlp_interpretability": mlp_interpretability_summary,
+            "mlp_interpretability_validation": mlp_interpretability_validation,
+            "campaign_valid_interpretability": campaign_valid_interpretability,
+            "campaign_valid_f7": campaign_valid_f7,
         }
+        results.update(
+            build_predictive_results_payload(
+                metric_spaces=metric_spaces,
+                raw_metric_contract_validation=raw_metric_contract_validation,
+                raw_inversion_status=raw_inversion_status,
+            )
+        )
         if test_metrics is not None:
             results["test"] = test_metrics
-        results_path = versioned_dir / f"{versioned_name}_results.yaml"
+        results_path = (
+            versioned_dir / "results.yaml"
+            if use_stable_single_copy
+            else versioned_dir / f"{versioned_name}_results.yaml"
+        )
         import yaml
         with open(results_path, "w") as f:
             yaml.dump(results, f, sort_keys=False)
         flowpre_log(f"📝 Saved results to: {results_path}", filename_or_path=log_file_path, verbose=verbose)
+        stable_results_path = versioned_dir / "results.yaml"
+        if not use_stable_single_copy:
+            shutil.copy2(results_path, stable_results_path)
 
-        cfg_path = Path(config_filename)
-        if not cfg_path.is_absolute():
-            cfg_path = ROOT_PATH / "config" / cfg_path
+        model_artifact_path = None
+        if bool(train_cfg.get("save_model", False)):
+            final_path = versioned_dir / f"{versioned_name}.pt"
+            torch.save(best_state, final_path)
+            model_artifact_path = final_path
+            flowpre_log(f"💾 Saved model: {final_path.name}", filename_or_path=log_file_path, verbose=verbose)
+
+        stable_cfg_snapshot_path = versioned_dir / "config.yaml"
+        if use_stable_single_copy:
+            shutil.copy2(resolved_cfg_path, stable_cfg_snapshot_path)
+        else:
+            versioned_cfg_snapshot_path = versioned_dir / f"{versioned_name}.yaml"
+            shutil.copy(resolved_cfg_path, versioned_cfg_snapshot_path)
+            shutil.copy2(versioned_cfg_snapshot_path, stable_cfg_snapshot_path)
+        flowpre_log(f"✅ Config saved under {versioned_dir}", filename_or_path=log_file_path, verbose=verbose)
 
         run_context = build_run_context(
             model_family="mlp",
             run_id=versioned_name,
             seed=seed,
             config=config,
-            config_path=cfg_path,
+            config_path=resolved_cfg_path,
             dataset_name=str(eval_ctx.get("dataset_name", DEFAULT_OFFICIAL_DATASET_NAME)),
             dataset_manifest_path=eval_ctx.get("dataset_manifest_path", official_raw_bundle_manifest_path()),
             split_id=str(eval_ctx.get("split_id", "init_temporal_processed_v1")),
@@ -1074,33 +1256,201 @@ def train_mlp_model(
             contract_id=comparison_contract["contract_id"],
             comparison_group_id=comparison_contract["comparison_group_id"],
             seed_set_id=comparison_contract["seed_set_id"],
+            seed_panel_path=eval_ctx.get("seed_panel_path"),
             base_config_id=comparison_contract["base_config_id"],
             objective_metric_id=comparison_contract["objective_metric_id"],
             dataset_level_axes=comparison_contract["dataset_level_axes"],
             run_level_axes=comparison_contract["run_level_axes"],
+            training_summary=training_summary,
             test_enabled=bool(test_metrics is not None and allow_test_holdout),
+            campaign_id=eval_ctx.get("campaign_id"),
+            dataset_candidate_id=eval_ctx.get("dataset_candidate_id"),
+            run_spec_id=eval_ctx.get("run_spec_id"),
+            trial_id=eval_ctx.get("trial_id"),
+            raw_metric_contract_id=raw_metric_contract_validation["raw_metric_contract_id"],
+            raw_metric_contract_validation=raw_metric_contract_validation,
+            run_mode=raw_metric_contract_validation["run_mode"],
+            campaign_valid=raw_metric_contract_validation["campaign_valid"],
+            raw_inversion_status=raw_inversion_status,
         )
-        _, metrics_long_path = save_canonical_run_artifacts(
+
+        split_meta = {}
+        for split_name, frame in {"val": X_val_eval, "test": X_test_eval}.items():
+            if frame is None:
+                split_meta[split_name] = None
+                continue
+            cols = [col for col in ("post_cleaning_index", condition_col, "is_synth") if col in frame.columns]
+            meta_df = frame[cols].copy()
+            if condition_col != "type" and condition_col in meta_df.columns:
+                meta_df = meta_df.rename(columns={condition_col: "type"})
+            split_meta[split_name] = meta_df
+        sidecar_splits = ["val"]
+        if test_metrics is not None and allow_test_holdout:
+            sidecar_splits.append("test")
+        prediction_sidecar_payloads, _ = build_prediction_sidecar_payload_from_native(
+            split_meta=split_meta,
+            predictions_by_split=predictions_by_split,
+            targets_by_split=targets_by_split,
+            target_names=list(target_names),
+            y_scaler=y_scaler,
+            include_splits=sidecar_splits,
+        )
+        prediction_sidecar_path = write_prediction_sidecar(
+            out_dir=versioned_dir,
+            split_payloads=prediction_sidecar_payloads,
+            target_names=list(target_names),
+        )
+
+        run_manifest_path, metrics_long_path = save_canonical_run_artifacts(
             results=results,
             context=run_context,
             out_dir=versioned_dir,
             stem=versioned_name,
+            filename_policy="stable_single_copy" if use_stable_single_copy else "versioned_aliases",
+            manifest_extra_fields=build_artifact_index_payload(
+                model_family="mlp",
+                results_path=stable_results_path,
+                run_manifest_path=versioned_dir / "run_manifest.json",
+                metrics_long_path=versioned_dir / "metrics_long.csv",
+                config_snapshot_path=stable_cfg_snapshot_path,
+                prediction_sidecar_path=prediction_sidecar_path,
+                model_artifact_path=model_artifact_path,
+                interpretability_artifact_paths=(
+                    None
+                    if mlp_interpretability_bundle is None
+                    else mlp_interpretability_bundle["artifact_paths"]
+                ),
+                interpretability_status_override=(
+                    None
+                    if mlp_interpretability_bundle is None
+                    else {
+                        "interpretability_policy_status": "implemented_mlp_block_10b_v1",
+                        "interpretability_artifacts": {
+                            key: (
+                                None
+                                if value is None
+                                else str(value)
+                            )
+                            for key, value in mlp_interpretability_bundle["artifact_paths"].items()
+                        },
+                        "interpretability_required_now": True,
+                        "interpretability_required_for_shortlist": True,
+                        "interpretability_required_for_finalist": True,
+                        "family_specific_implementation_pending": False,
+                    }
+                ),
+            ),
         )
+        stable_run_manifest_path = versioned_dir / "run_manifest.json"
+        stable_metrics_long_path = versioned_dir / "metrics_long.csv"
+        canonical_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+        canonical_manifest.update(
+            {
+                "results_path": str(stable_results_path),
+                "config_snapshot_path": str(stable_cfg_snapshot_path),
+                "prediction_sidecar_path": None if prediction_sidecar_path is None else str(prediction_sidecar_path),
+                "model_path": None if model_artifact_path is None else str(model_artifact_path),
+                "analysis_contracts": analysis_contracts,
+                "parsed_factor_fields": dict(eval_ctx.get("parsed_factor_fields") or {}),
+                "mlp_interpretability_contract_id": (
+                    None
+                    if mlp_interpretability_validation is None
+                    else mlp_interpretability_validation["mlp_interpretability_contract_id"]
+                ),
+                "mlp_interpretability_validation": mlp_interpretability_validation,
+                "campaign_valid_interpretability": campaign_valid_interpretability,
+                "campaign_valid_f7": campaign_valid_f7,
+                "interpretability_summary_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else str(mlp_interpretability_bundle["artifact_paths"]["interpretability_summary_json"])
+                ),
+                "input_feature_influence_global_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else str(mlp_interpretability_bundle["artifact_paths"]["input_feature_influence_global_csv"])
+                ),
+                "input_feature_influence_per_class_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else str(mlp_interpretability_bundle["artifact_paths"]["input_feature_influence_per_class_csv"])
+                ),
+                "feature_influence_global_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else str(mlp_interpretability_bundle["artifact_paths"]["feature_influence_global_csv"])
+                ),
+                "feature_influence_per_class_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else str(mlp_interpretability_bundle["artifact_paths"]["feature_influence_per_class_csv"])
+                ),
+                "top_features_global_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else str(mlp_interpretability_bundle["artifact_paths"]["top_features_global_csv"])
+                ),
+                "top_features_per_class_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else str(mlp_interpretability_bundle["artifact_paths"]["top_features_per_class_csv"])
+                ),
+                "latent_feature_influence_global_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else (
+                        None
+                        if mlp_interpretability_bundle["artifact_paths"]["latent_feature_influence_global_csv"] is None
+                        else str(mlp_interpretability_bundle["artifact_paths"]["latent_feature_influence_global_csv"])
+                    )
+                ),
+                "latent_feature_influence_per_class_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else (
+                        None
+                        if mlp_interpretability_bundle["artifact_paths"]["latent_feature_influence_per_class_csv"] is None
+                        else str(mlp_interpretability_bundle["artifact_paths"]["latent_feature_influence_per_class_csv"])
+                    )
+                ),
+                "flowpre_projection_manifest_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else (
+                        None
+                        if mlp_interpretability_bundle["artifact_paths"]["flowpre_projection_manifest_json"] is None
+                        else str(mlp_interpretability_bundle["artifact_paths"]["flowpre_projection_manifest_json"])
+                    )
+                ),
+                "flowpre_projection_cache_path": (
+                    None
+                    if mlp_interpretability_bundle is None
+                    else (
+                        None
+                        if mlp_interpretability_bundle["artifact_paths"]["flowpre_projection_cache_path"] is None
+                        else str(mlp_interpretability_bundle["artifact_paths"]["flowpre_projection_cache_path"])
+                    )
+                ),
+            }
+        )
+        run_manifest_path.write_text(json.dumps(canonical_manifest, indent=2, sort_keys=True), encoding="utf-8")
+        if run_manifest_path != stable_run_manifest_path:
+            stable_run_manifest_path.write_text(json.dumps(canonical_manifest, indent=2, sort_keys=True), encoding="utf-8")
+        if metrics_long_path != stable_metrics_long_path:
+            shutil.copy2(metrics_long_path, stable_metrics_long_path)
         flowpre_log(
             f"🧾 Saved canonical metrics table to: {metrics_long_path}",
             filename_or_path=log_file_path,
             verbose=verbose,
         )
-
-    # Save model(s)
-    if bool(train_cfg.get("save_model", False)):
-        final_path = versioned_dir / f"{versioned_name}.pt"
-        torch.save(best_state, final_path)
-        flowpre_log(f"💾 Saved model: {final_path.name}", filename_or_path=log_file_path, verbose=verbose)
-
-    # Always save the config for reproducibility
-    shutil.copy(ROOT_PATH / "config" / config_filename, versioned_dir / f"{versioned_name}.yaml")
-    flowpre_log(f"✅ Config saved under {versioned_dir}", filename_or_path=log_file_path, verbose=verbose)
+    else:
+        if bool(train_cfg.get("save_model", False)):
+            final_path = versioned_dir / f"{versioned_name}.pt"
+            torch.save(best_state, final_path)
+            flowpre_log(f"💾 Saved model: {final_path.name}", filename_or_path=log_file_path, verbose=verbose)
+        versioned_cfg_snapshot_path = versioned_dir / f"{versioned_name}.yaml"
+        shutil.copy(resolved_cfg_path, versioned_cfg_snapshot_path)
+        flowpre_log(f"✅ Config saved under {versioned_dir}", filename_or_path=log_file_path, verbose=verbose)
 
     return (model, val_metrics)
 
@@ -1112,6 +1462,8 @@ def train_mlp_pipeline(
     condition_col: str = "type",
     config_filename: str = "mlp.yaml",
     base_name: str = "mlp",
+    run_id: str | None = None,
+    run_dir: str | Path | None = None,
     device: str = "cuda",
     seed: int | None = None,
     verbose: bool = True,
@@ -1153,6 +1505,20 @@ def train_mlp_pipeline(
         X_df = X_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
         y_df = y_df.sort_values("post_cleaning_index").reset_index(drop=True).copy()
 
+        # Keep a single canonical synthetic-flag column before merging.
+        # In canonical augmented bundles the flag can appear in both X and y
+        # train splits; if we merge blindly pandas will suffix it away.
+        has_x_synth = "is_synth" in X_df.columns
+        has_y_synth = "is_synth" in y_df.columns
+        if has_x_synth and has_y_synth:
+            x_synth = X_df[["post_cleaning_index", "is_synth"]].rename(columns={"is_synth": "is_synth_x"})
+            y_synth = y_df[["post_cleaning_index", "is_synth"]].rename(columns={"is_synth": "is_synth_y"})
+            synth_check = pd.merge(x_synth, y_synth, on="post_cleaning_index", how="inner", validate="one_to_one")
+            mismatch = synth_check["is_synth_x"].astype(int) != synth_check["is_synth_y"].astype(int)
+            if mismatch.any():
+                raise ValueError("Synthetic flag mismatch between X and y splits while building cXy.")
+            y_df = y_df.drop(columns=["is_synth"]).copy()
+
         df = pd.merge(X_df, y_df, on="post_cleaning_index", how="inner", validate="one_to_one")
 
         # --- columnas X ---
@@ -1163,9 +1529,11 @@ def train_mlp_pipeline(
         if "is_synth" in x_cols:
             x_cols.remove("is_synth")
             synth_cols = ["is_synth"]
+        elif "is_synth" in y_df.columns:
+            synth_cols = ["is_synth"]
 
         # --- columnas y ---
-        y_cols = [c for c in y_df.columns if c != "post_cleaning_index"]
+        y_cols = [c for c in y_df.columns if c not in {"post_cleaning_index", "is_synth"}]
 
         return df[["post_cleaning_index", condition_col] + synth_cols + x_cols + y_cols].copy()
 
@@ -1181,6 +1549,8 @@ def train_mlp_pipeline(
         allow_test_holdout=allow_test_holdout,
         config_filename=config_filename,
         base_name=base_name,
+        run_id=run_id,
+        run_dir=run_dir,
         device=device,
         seed=seed,
         verbose=verbose,

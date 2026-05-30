@@ -192,46 +192,55 @@ def setup_training_logs_and_dirs(
     relative_subdir: str | None = None,
     fixed_run_id: str | None = None,
     log_in_run_dir: bool = False,
+    absolute_run_dir: str | Path | None = None,
 ):
-    base_model_dir = ROOT_PATH / "outputs" / "models"
-    base_logs_dir = ROOT_PATH / "outputs" / "logs"
-    if namespace:
-        base_model_dir = base_model_dir / namespace / subdir
-        base_logs_dir = base_logs_dir / namespace / subdir
-    else:
-        base_model_dir = base_model_dir / subdir
-        base_logs_dir = base_logs_dir / subdir
-    if relative_subdir:
-        base_model_dir = base_model_dir / relative_subdir
-        base_logs_dir = base_logs_dir / relative_subdir
-    base_model_dir.mkdir(parents=True, exist_ok=True)
-
-    if fixed_run_id is not None:
-        versioned_name = str(fixed_run_id)
-        versioned_dir = base_model_dir / versioned_name
+    if absolute_run_dir is not None:
+        versioned_dir = Path(absolute_run_dir)
+        versioned_name = str(fixed_run_id or versioned_dir.name)
         if versioned_dir.exists():
             raise FileExistsError(f"Run directory already exists: {versioned_dir}")
     else:
-        # Determine next version
-        existing_versions = [
-            d for d in base_model_dir.iterdir()
-            if d.is_dir() and d.name.startswith(base_name + "_v")
-        ]
-        if existing_versions:
-            version_numbers = [
-                int(d.name.split("_v")[-1]) for d in existing_versions if d.name.split("_v")[-1].isdigit()
-            ]
-            next_version = max(version_numbers) + 1
+        base_model_dir = ROOT_PATH / "outputs" / "models"
+        base_logs_dir = ROOT_PATH / "outputs" / "logs"
+        if namespace:
+            base_model_dir = base_model_dir / namespace / subdir
+            base_logs_dir = base_logs_dir / namespace / subdir
         else:
-            next_version = 1
+            base_model_dir = base_model_dir / subdir
+            base_logs_dir = base_logs_dir / subdir
+        if relative_subdir:
+            base_model_dir = base_model_dir / relative_subdir
+            base_logs_dir = base_logs_dir / relative_subdir
+        base_model_dir.mkdir(parents=True, exist_ok=True)
 
-        versioned_name = f"{base_name}_v{next_version}"
-        versioned_dir = base_model_dir / versioned_name
+        if fixed_run_id is not None:
+            versioned_name = str(fixed_run_id)
+            versioned_dir = base_model_dir / versioned_name
+            if versioned_dir.exists():
+                raise FileExistsError(f"Run directory already exists: {versioned_dir}")
+        else:
+            # Determine next version
+            existing_versions = [
+                d for d in base_model_dir.iterdir()
+                if d.is_dir() and d.name.startswith(base_name + "_v")
+            ]
+            if existing_versions:
+                version_numbers = [
+                    int(d.name.split("_v")[-1]) for d in existing_versions if d.name.split("_v")[-1].isdigit()
+                ]
+                next_version = max(version_numbers) + 1
+            else:
+                next_version = 1
+
+            versioned_name = f"{base_name}_v{next_version}"
+            versioned_dir = base_model_dir / versioned_name
     versioned_dir.mkdir(parents=True)
 
     # ───── Log file setup ─────
     log_file_path = None
     if log_training:
+        if absolute_run_dir is not None:
+            base_logs_dir = versioned_dir
         if log_in_run_dir:
             log_file_path = versioned_dir / f"{versioned_name}.log"
         else:

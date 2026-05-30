@@ -1,0 +1,39 @@
+xgb_interpretability_contract:
+  contract_id: f7_xgb_interpretability_contract_v1
+  contract_version: 1
+  applies_to_model_family: xgboost
+  required_splits_by_run_mode:
+    selection_run:
+      - val
+    holdout_run:
+      - val
+      - test
+  required_scopes:
+    - global
+    - per_class
+  feature_surface_policy:
+    feature_space_kind_primary: xgb_model_input_feature
+    type_feature_policy: included
+  shap_layer:
+    method_id: f7_xgb_tree_shap_v1
+    explainer: TreeExplainer
+    ranking_metric_primary: mean_abs_shap
+    ranking_metric_auxiliary: mean_signed_shap
+    require_expected_value_per_split: true
+    persist_per_sample_values: false
+  perturbation_layer:
+    method_id: f7_xgb_feature_effects_v1
+    ranking_metric_primary: mean_abs_delta_pred_raw
+    ranking_metric_auxiliary: mean_signed_delta_pred_raw
+    baseline_policy: class_conditioned_train_mean_input_space
+    delta_definition: original_minus_perturbed
+    feature_chunk_size: 16
+  persisted_distribution_statistics:
+    - sum_abs
+    - std_abs
+    - median_abs
+    - p90_abs
+    - p95_abs
+    - stderr_abs
+  persisted_relative_statistics:
+    - share_abs_importance

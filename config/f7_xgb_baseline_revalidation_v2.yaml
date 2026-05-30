@@ -1,0 +1,98 @@
+study:
+  study_id: "f7_xgb_baseline_revalidation_v2"
+  description: "Micro-revalidacion final 3x9 del baseline XGBoost para F7"
+
+dataset:
+  dataset_name: "official_raw_xgb_base_v1"
+  split_mode: "official"
+  df_name: "df_input_v6"
+  split_id: "init_temporal_processed_v1"
+  condition_col: "type"
+  target_col: "init"
+  representation:
+    x_transform: "raw"
+    y_transform: "raw"
+    synthetic_policy: "none"
+    feature_policy: "raw_numeric_plus_type_onehot"
+
+protocol:
+  objective_metric_id: "raw_real.macro.rrmse"
+  objective_metric_path: "macro.rrmse"
+  top_k_shap: 3
+  shap_sample_size: 128
+  base_config:
+    objective: "reg:squarederror"
+    n_estimators: 1200
+    learning_rate: 0.035
+    max_depth: 4
+    min_child_weight: 8
+    subsample: 0.85
+    colsample_bytree: 0.80
+    reg_alpha: 0.02
+    reg_lambda: 1.50
+    gamma: 0.0
+    tree_method: "hist"
+    max_bin: 256
+    eval_metric: "rmse"
+    early_stopping_rounds: 60
+  seeds:
+    seed_set_id: "f7_xgb_reval2_v1"
+    values: [1234, 2345, 3456]
+
+variants:
+  - cfg_id: "anchor_d4_mc8"
+    rationale: "Mejor candidata defendible de la v1; punto de partida de la micro-revalidacion."
+    params: {}
+
+  - cfg_id: "d4_mc10"
+    rationale: "Mas regularizacion via min_child_weight para reducir tension train-val."
+    params:
+      min_child_weight: 10
+
+  - cfg_id: "d4_mc12"
+    rationale: "Chequeo aun mas conservador de min_child_weight."
+    params:
+      min_child_weight: 12
+
+  - cfg_id: "d4_mc8_lr2e2"
+    rationale: "Misma estructura con learning rate mas bajo para buscar un ajuste menos agresivo."
+    params:
+      learning_rate: 0.02
+
+  - cfg_id: "d4_mc10_lr2e2"
+    rationale: "Combinacion conservadora de menor learning rate y mayor min_child_weight."
+    params:
+      learning_rate: 0.02
+      min_child_weight: 10
+
+  - cfg_id: "d4_mc8_gamma02"
+    rationale: "Penalizacion ligera de split para frenar particiones marginales."
+    params:
+      gamma: 0.2
+
+  - cfg_id: "d3_mc8_lr5e2_sub10"
+    rationale: "Version mas regularizada de la mejor cfg bruta de la v1."
+    params:
+      max_depth: 3
+      min_child_weight: 8
+      learning_rate: 0.05
+      subsample: 1.0
+      colsample_bytree: 1.0
+
+  - cfg_id: "d3_mc10_lr5e2_sub10"
+    rationale: "Misma idea que la anterior, pero con mas restriccion en el peso minimo del hijo."
+    params:
+      max_depth: 3
+      min_child_weight: 10
+      learning_rate: 0.05
+      subsample: 1.0
+      colsample_bytree: 1.0
+
+  - cfg_id: "d3_mc8_lr35e3_sub09"
+    rationale: "Compromiso entre la mejor cfg bruta y una version menos tensa en muestreo y learning rate."
+    params:
+      max_depth: 3
+      min_child_weight: 8
+      learning_rate: 0.035
+      subsample: 0.9
+      colsample_bytree: 0.9

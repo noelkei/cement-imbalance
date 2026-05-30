@@ -1,0 +1,39 @@
+policy:
+  policy_id: "f7_synthetic_guardrails_v1"
+  split_id: "init_temporal_processed_v1"
+  condition_col: "type"
+  target_col: "init"
+  post_cleaning_index_col: "post_cleaning_index"
+  synth_flag_col: "is_synth"
+
+retry:
+  max_attempt_batches_per_class: 32
+  batch_size_mode: "remaining_times_two_min_16"
+
+hard_rejects:
+  reject_non_finite: true
+  reject_invalid_class_label: true
+  reject_majority_class_synth: true
+  reject_quota_violations: true
+  reject_duplicate_real_rows: true
+  reject_duplicate_synth_rows: true
+  reject_negative_target: true
+  reject_negative_modeled_raw_numeric: true
+  nonnegative_exempt_columns:
+    - "a"
+    - "b"
+  nonnegative_exempt_prefixes:
+    - "ilr_"
+
+soft_audits:
+  learned_cleaning_audit_mode: "audit_only"
+  run_univariate_rules: true
+  run_iforest_rules: true
+  run_overlap_rules: true
+  run_distance_to_real_summary: true
+
+manifest_requirements:
+  require_reject_reason_counts: true
+  require_attempt_counts_by_class: true
+  require_soft_audit_counts: true
+  require_sample_fingerprint_sha256: true

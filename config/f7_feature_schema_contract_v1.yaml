@@ -1,0 +1,19 @@
+feature_schema_contract:
+  contract_id: "f7_feature_schema_contract_v1"
+  contract_version: 1
+  namespaces:
+    semantic_input:
+      feature_space_kind: "semantic_input"
+      primary_surface_id: "semantic_bridge_perturbation"
+    flowpre_projected_semantic_input:
+      feature_space_kind: "flowpre_projected_semantic_input"
+      primary_surface_id: "semantic_bridge_perturbation"
+    flowpre_latent:
+      feature_space_kind: "flowpre_latent"
+      primary_surface_id: "mlp_flowpre_native_latent_perturbation"
+    xgb_perturbation:
+      feature_space_kind: "xgb_perturbation"
+      primary_surface_id: "semantic_bridge_perturbation"
+    xgb_shap:
+      feature_space_kind: "xgb_shap"
+      primary_surface_id: "xgb_native_shap"

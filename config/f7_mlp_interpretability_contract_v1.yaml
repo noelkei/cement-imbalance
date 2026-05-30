@@ -1,0 +1,64 @@
+mlp_interpretability_contract:
+  contract_id: f7_mlp_interpretability_contract_v1
+  contract_version: 1
+  method_id: f7_mlp_feature_effects_v1
+  applies_to_model_family: mlp
+  required_splits_by_run_mode:
+    selection_run:
+      - val
+    holdout_run:
+      - val
+      - test
+  required_scopes:
+    - global
+    - per_class
+  ranking_metric_primary: mean_abs_delta_pred_raw
+  ranking_metric_auxiliary: mean_signed_delta_pred_raw
+  persisted_distribution_statistics:
+    - sum_abs_delta_pred_raw
+    - std_abs_delta_pred_raw
+    - median_abs_delta_pred_raw
+    - p90_abs_delta_pred_raw
+    - p95_abs_delta_pred_raw
+    - stderr_abs_delta_pred_raw
+  persisted_relative_statistics:
+    - share_abs_importance
+  top_k_for_reporting: 10
+  final_surface_policy: mixed_direct_plus_compositional_components
+  compositional_projection_policy: normalized_component_reconstruction_from_ilr
+  ilr_artifacts_policy: auxiliary_only
+  final_artifact_must_exclude_prefixes:
+    - "ilr_"
+  perturbation:
+    baseline_policy: class_conditioned_train_mean_input_space
+    delta_definition: original_minus_perturbed
+    feature_chunk_size: 16
+  feature_space_policy:
+    model_input_space:
+      - direct_features
+      - ilr_chem_features
+      - ilr_phase_features
+    latent_space:
+      enabled_for_x_transform:
+        - flowpre_candidate_1
+        - flowpre_candidate_2
+    final_semantic_space:
+      - direct_features
+      - chem_components
+      - phase_components
+    direct_semantic_input_for_x_transform:
+      - standard
+      - robust
+      - quantile
+      - minmax
+    flowpre_latent_projection_required_for_x_transform:
+      - flowpre_candidate_1
+      - flowpre_candidate_2
+  flowpre_projection:
+    cache_version: 1
+    cache_root: outputs/reports/f7_flowpre_projection_cache
+    sweep_offset_range:
+      - -1.0
+      - 1.0
+    sweep_num_steps: 33
+    normalize_rows: true

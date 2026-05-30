@@ -33,6 +33,10 @@ CLASSICAL_X_TRANSFORMS = (
     "quantile",
 )
 
+RAW_X_TRANSFORMS = (
+    "raw",
+)
+
 FLOWPRE_SCALER_X_TRANSFORMS = (
     "flowpre_rrmse",
     "flowpre_mvn",
@@ -46,8 +50,9 @@ FLOWGEN_WORK_BASE_X_TRANSFORMS = (
 
 FLOWPRE_X_TRANSFORMS = FLOWPRE_SCALER_X_TRANSFORMS + FLOWGEN_WORK_BASE_X_TRANSFORMS
 
-SUPPORTED_X_TRANSFORMS = CLASSICAL_X_TRANSFORMS + FLOWPRE_X_TRANSFORMS
+SUPPORTED_X_TRANSFORMS = RAW_X_TRANSFORMS + CLASSICAL_X_TRANSFORMS + FLOWPRE_X_TRANSFORMS
 SUPPORTED_Y_TRANSFORMS = (
+    "raw",
     "standard",
     "robust",
     "minmax",
@@ -56,6 +61,8 @@ SUPPORTED_Y_TRANSFORMS = (
 SUPPORTED_SYNTHETIC_POLICIES = (
     "none",
     "flowgen",
+    "flowgen_official",
+    "flowgen_train_only",
     "kmeans_smote",
 )
 
@@ -97,6 +104,10 @@ def is_flowpre_x_transform(x_transform: str) -> bool:
 
 def is_classical_x_transform(x_transform: str) -> bool:
     return x_transform in CLASSICAL_X_TRANSFORMS
+
+
+def is_raw_x_transform(x_transform: str) -> bool:
+    return x_transform in RAW_X_TRANSFORMS
 
 
 def is_flowgen_work_base_x_transform(x_transform: str) -> bool:
@@ -166,6 +177,45 @@ def classify_supported_dataset_space(
             "dataset_storage_family": "unknown",
         }
 
+    if is_raw_x_transform(x_transform):
+        if y_transform != "raw":
+            return {
+                "support_status": "out_of_scope",
+                "status_reason": "Raw X space is only supported together with raw Y space.",
+                "source_requirements": [],
+                "dataset_storage_family": "unknown",
+            }
+
+        storage_family = "official_xgb_raw" if synthetic_policy == "none" else "official_xgb_augmented_raw"
+        if synthetic_policy == "none":
+            return {
+                "support_status": "materialized_now",
+                "status_reason": (
+                    "Raw/raw modeled bundle is the canonical XGBoost base dataset family."
+                ),
+                "source_requirements": ["official_raw_bundle"],
+                "dataset_storage_family": storage_family,
+            }
+        if synthetic_policy == "kmeans_smote":
+            return {
+                "support_status": "materialized_now",
+                "status_reason": (
+                    "KMeans-SMOTE is supported directly over the raw/raw XGBoost bundle space."
+                ),
+                "source_requirements": ["official_raw_bundle"],
+                "dataset_storage_family": storage_family,
+            }
+        if synthetic_policy in {"flowgen", "flowgen_official", "flowgen_train_only"}:
+            return {
+                "support_status": "supported_space",
+                "status_reason": (
+                    "FlowGen synthetic policies operate in modeled-raw space and can be "
+                    "projected directly into the canonical raw/raw XGBoost bundle."
+                ),
+                "source_requirements": ["official_raw_bundle", "flowgen_upstream"],
+                "dataset_storage_family": storage_family,
+            }
+
     storage_family = "official_scaled" if synthetic_policy == "none" else "official_augmented_scaled"
 
     if synthetic_policy == "kmeans_smote":
@@ -191,25 +241,19 @@ def classify_supported_dataset_space(
             "dataset_storage_family": storage_family,
         }
 
-    if synthetic_policy == "flowgen":
-        if not is_flowgen_work_base_x_transform(x_transform):
-            return {
-                "support_status": "out_of_scope",
-                "status_reason": (
-                    "flowgen synthetic_policy is only defined for the FlowGen work bases "
-                    "flowpre_candidate_1 and flowpre_candidate_2."
-                ),
-                "source_requirements": [],
-                "dataset_storage_family": storage_family,
-            }
+    if synthetic_policy in {"flowgen", "flowgen_official", "flowgen_train_only"}:
+        source_requirements = ["official_raw_bundle", "flowgen_upstream"]
+        if is_flowpre_x_transform(x_transform):
+            source_requirements.append("flowpre_upstream")
         return {
-            "support_status": "blocked_by_upstream",
+            "support_status": "supported_space",
             "status_reason": (
-                "flowgen synthetic_policy is supported by contract for the work bases "
-                "flowpre_candidate_1 / flowpre_candidate_2, but it remains blocked "
-                "until a promoted FlowGen upstream exists for the selected work base."
+                "FlowGen-based synthetic policies operate by generating candidates in the canonical "
+                "modeled-raw space and then projecting them into the selected non-synthetic bundle. "
+                "They require a promoted FlowGen upstream and, for FlowPre-based X transforms, the "
+                "paired FlowPre upstream used to express synthetic rows into latent space."
             ),
-            "source_requirements": ["official_raw_bundle", "flowpre_upstream", "flowgen_upstream"],
+            "source_requirements": source_requirements,
             "dataset_storage_family": storage_family,
         }
 

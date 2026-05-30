@@ -1,0 +1,38 @@
+metric_availability_contract:
+  contract_id: "f7_metric_availability_contract_v1"
+  contract_version: 1
+  by_model_family:
+    mlp:
+      predictive_surfaces:
+        required_value_spaces:
+          - "raw_real"
+        optional_value_spaces:
+          - "native"
+      required_metric_scopes:
+        - "overall"
+        - "macro"
+        - "per_class"
+      optional_metric_scopes:
+        - "worst_class"
+      quantile_support: false
+      interpretability_surfaces:
+        primary:
+          - "semantic_bridge_perturbation"
+        auxiliary:
+          - "mlp_flowpre_native_latent_perturbation"
+    xgboost:
+      predictive_surfaces:
+        required_value_spaces:
+          - "raw_real"
+      required_metric_scopes:
+        - "overall"
+        - "macro"
+        - "per_class"
+      optional_metric_scopes:
+        - "worst_class"
+      quantile_support: false
+      interpretability_surfaces:
+        primary:
+          - "semantic_bridge_perturbation"
+        auxiliary:
+          - "xgb_native_shap"

@@ -1,0 +1,56 @@
+seed_panel:
+  seed_set_id: "f7_seed_panel_extension1_v1"
+  panel_version: 1
+  panel_size: 30
+  construction_policy: "explicit_frozen_panel"
+  construction_note: "Primer bloque de 30 seeds adicionales para la campaña F7, disjunto del panel base y de futuras extensiones."
+  shared_across_model_families: true
+  applies_to:
+    - "mlp"
+    - "xgboost"
+  mapping_semantics:
+    mlp:
+      campaign_seed_role: "training_replica_seed"
+      expected_bindings:
+        - "python random seed"
+        - "numpy random seed"
+        - "torch random seed"
+      note: "La seed de campaña gobierna la réplica de entrenamiento; no rematerializa datasets sintéticos F7, que ya están congelados."
+    xgboost:
+      campaign_seed_role: "booster_random_state"
+      expected_bindings:
+        - "xgboost random_state"
+        - "numpy random seed when applicable"
+      note: "La seed de campaña gobierna la réplica del booster y debe persistirse como random_state de la run."
+  dataset_materialization_note: "No aplica a la materialización de datasets F7; los datasets sintéticos ya están congelados como artefactos fijos."
+  seeds:
+    - {index: 31, value: 34564}
+    - {index: 32, value: 35675}
+    - {index: 33, value: 36786}
+    - {index: 34, value: 37897}
+    - {index: 35, value: 39008}
+    - {index: 36, value: 40119}
+    - {index: 37, value: 41230}
+    - {index: 38, value: 42341}
+    - {index: 39, value: 43452}
+    - {index: 40, value: 44563}
+    - {index: 41, value: 45674}
+    - {index: 42, value: 46785}
+    - {index: 43, value: 47896}
+    - {index: 44, value: 49007}
+    - {index: 45, value: 50118}
+    - {index: 46, value: 51229}
+    - {index: 47, value: 52340}
+    - {index: 48, value: 53451}
+    - {index: 49, value: 54562}
+    - {index: 50, value: 55673}
+    - {index: 51, value: 56784}
+    - {index: 52, value: 57895}
+    - {index: 53, value: 59006}
+    - {index: 54, value: 60117}
+    - {index: 55, value: 61228}
+    - {index: 56, value: 62339}
+    - {index: 57, value: 63450}
+    - {index: 58, value: 64561}
+    - {index: 59, value: 65672}
+    - {index: 60, value: 66783}

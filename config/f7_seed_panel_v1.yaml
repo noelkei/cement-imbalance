@@ -1,0 +1,56 @@
+seed_panel:
+  seed_set_id: "f7_seed_panel_v1"
+  panel_version: 1
+  panel_size: 30
+  construction_policy: "explicit_frozen_panel"
+  construction_note: "Panel fijado manualmente para F7 con enteros simples, unicos y orden estable."
+  shared_across_model_families: true
+  applies_to:
+    - "mlp"
+    - "xgboost"
+  mapping_semantics:
+    mlp:
+      campaign_seed_role: "training_replica_seed"
+      expected_bindings:
+        - "python random seed"
+        - "numpy random seed"
+        - "torch random seed"
+      note: "La seed de campaña gobierna la replica de entrenamiento; no rematerializa datasets sinteticos F7, que ya estan congelados."
+    xgboost:
+      campaign_seed_role: "booster_random_state"
+      expected_bindings:
+        - "xgboost random_state"
+        - "numpy random seed when applicable"
+      note: "La seed de campaña gobierna la replica del booster y debe persistirse como random_state de la run."
+  dataset_materialization_note: "No aplica a la materializacion de datasets F7; los datasets sinteticos ya estan congelados como artefactos fijos."
+  seeds:
+    - {index: 1, value: 1234}
+    - {index: 2, value: 2345}
+    - {index: 3, value: 3456}
+    - {index: 4, value: 4567}
+    - {index: 5, value: 5678}
+    - {index: 6, value: 6789}
+    - {index: 7, value: 7900}
+    - {index: 8, value: 9011}
+    - {index: 9, value: 10122}
+    - {index: 10, value: 11233}
+    - {index: 11, value: 12344}
+    - {index: 12, value: 13455}
+    - {index: 13, value: 14566}
+    - {index: 14, value: 15677}
+    - {index: 15, value: 16788}
+    - {index: 16, value: 17899}
+    - {index: 17, value: 19010}
+    - {index: 18, value: 20121}
+    - {index: 19, value: 21232}
+    - {index: 20, value: 22343}
+    - {index: 21, value: 23454}
+    - {index: 22, value: 24565}
+    - {index: 23, value: 25676}
+    - {index: 24, value: 26787}
+    - {index: 25, value: 27898}
+    - {index: 26, value: 29009}
+    - {index: 27, value: 30120}
+    - {index: 28, value: 31231}
+    - {index: 29, value: 32342}
+    - {index: 30, value: 33453}

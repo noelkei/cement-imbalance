@@ -1,0 +1,601 @@
+study:
+  study_id: "f7_mlp_baseline_revalidation_v1"
+  description: "Mini-revalidacion 3x40 del baseline MLP para F7"
+
+dataset:
+  scaled_set_name: "df_scaled_xstandard_yminmax"
+  dataset_name: "dataset__x-standard__y-minmax__syn-none__v1"
+  dataset_manifest_path: "data/sets/official/init_temporal_processed_v1/scaled/df_scaled_xstandard_yminmax/meta/manifest.json"
+  split_id: "init_temporal_processed_v1"
+  condition_col: "type"
+  dataset_level_axes:
+    x_transform: "standard"
+    y_transform: "minmax"
+    synthetic_policy: "none"
+
+protocol:
+  base_config_path: "config/mlp_closure_base_v1.yaml"
+  objective_metric_id: "raw_real.macro.rrmse"
+  objective_metric_path: "macro.rrmse"
+  fixed_overrides:
+    contract.seed_set_id: "f7_mlp_reval3_v1"
+    contract.objective_metric_id: "raw_real.macro.rrmse"
+    training.loss_reduction: "overall"
+    training.regression_group_metric: "rmse"
+    training.dataloader_mode: "baseline"
+    training.cycle_reals: false
+    training.allow_synth: true
+    training.save_model: false
+    training.save_states: false
+    training.save_results: true
+    training.log_training: false
+    interpretability.compute_shap: false
+    interpretability.save_influence: false
+  seeds:
+    seed_set_id: "f7_mlp_reval3_v1"
+    values: [1234, 2345, 3456]
+  test_policy:
+    use_test_for_selection: false
+    winner_check: "single_winner_only"
+
+variants:
+  - cfg_id: "legacy_anchor_bs256_e200"
+    rationale: "Ancla heredada de mlp_closure_base_v1; referencia historica aunque no sea compatible con balanced+cycling."
+    params:
+      training.batch_size: 256
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: false
+      note: "batch_size 256 no es divisible por 3"
+
+  - cfg_id: "f7_anchor_bs264_e200"
+    rationale: "Anchor F7 cercano al legado pero ya compatible con 3 clases en balanced+cycling."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs198_e200"
+    rationale: "Batch mas pequeño para comprobar si mejora estabilidad/generalizacion sin tocar arquitectura."
+    params:
+      training.batch_size: 198
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs132_e200"
+    rationale: "Batch aun mas pequeño para explorar gradiente mas ruidoso y coste por epoca."
+    params:
+      training.batch_size: 132
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_e300"
+    rationale: "Mas presupuesto de entrenamiento para revisar si 200 epochs se quedan cortas."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_e500"
+    rationale: "Chequeo alto de epoch budget para ver si 500 aporta algo real o solo coste."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 500
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_lr5e5"
+    rationale: "Learning rate mas conservador para comprobar si la base actual va demasiado agresiva."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.00005
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_lr3e4"
+    rationale: "Learning rate mas alto para comprobar si converge mejor con scheduler plateau."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0003
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_hd192"
+    rationale: "Red algo mas ancha para ver si la capacidad adicional ayuda sin cambiar profundidad."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_l4"
+    rationale: "Red algo mas profunda para revisar si tres capas se quedan cortas."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_hd192_l4_e300"
+    rationale: "Combina mas anchura, mas profundidad y 300 epochs para buscar mejora estructural clara."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_hd192_l4_e500"
+    rationale: "Misma capacidad ampliada con mas budget para ver si la mejora depende de entrenar mas tiempo."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 500
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_hd256_l3_e300"
+    rationale: "Aumenta solo anchura de forma mas agresiva manteniendo tres capas."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_hd256_l3_e500"
+    rationale: "Prueba si una red mas ancha necesita mas epochs para aprovechar la capacidad extra."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 500
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_hd256_l4_e300"
+    rationale: "Sube a la vez anchura y profundidad con budget intermedio para buscar ganancia neta fuerte."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs264_hd256_l4_e500"
+    rationale: "Configuracion de capacidad alta y budget alto para medir si el techo actual estaba limitado por modelo."
+    params:
+      training.batch_size: 264
+      training.num_epochs: 500
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs198_hd192_l3_e300"
+    rationale: "Combina el batch que mejor iba en parcial con mas anchura y mas budget."
+    params:
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs198_hd192_l4_e300"
+    rationale: "Explora si el batch 198 tambien se beneficia de una red algo mas profunda."
+    params:
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs198_hd256_l3_e300"
+    rationale: "Version mas ancha sobre el batch 198 para comprobar si la mejora parcial escala con capacidad."
+    params:
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "bs198_hd256_l4_e300"
+    rationale: "Configuracion combinada fuerte sobre batch 198 para verificar si la mejora es robusta o marginal."
+    params:
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_bs198_e200"
+    rationale: "Chequeo run-level con per_class_equal+rmse bajo regimen plain y batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 198
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_bs264_e200"
+    rationale: "Mismo loss per_class_equal+rmse en plain con el anchor F7 de batch 264."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 264
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_bs198_hd192_l3_e300"
+    rationale: "per_class_equal+rmse en plain con mas anchura y budget moderado sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_bs264_hd192_l4_e300"
+    rationale: "per_class_equal+rmse en plain con mas profundidad sobre anchor F7."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_plain_bs198_hd256_l4_e300"
+    rationale: "per_class_equal+rmse en plain con combinacion fuerte de anchura y profundidad sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_bs198_e200"
+    rationale: "Chequeo run-level con per_class_equal+rmse bajo regimen imbalance_aware y batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 198
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_bs264_e200"
+    rationale: "per_class_equal+rmse en imbalance_aware con el anchor F7 de batch 264."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 264
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_bs198_hd192_l3_e300"
+    rationale: "per_class_equal+rmse en imbalance_aware con mayor anchura sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_bs264_hd192_l4_e300"
+    rationale: "per_class_equal+rmse en imbalance_aware con mayor profundidad sobre batch 264."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rmse_aware_bs198_hd256_l4_e300"
+    rationale: "per_class_equal+rmse en imbalance_aware con combinacion fuerte de capacidad sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_bs198_e200"
+    rationale: "Chequeo run-level con per_class_equal+rrmse bajo regimen plain y batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 198
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_bs264_e200"
+    rationale: "Mismo loss per_class_equal+rrmse en plain con el anchor F7 de batch 264."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 264
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_bs198_hd192_l3_e300"
+    rationale: "per_class_equal+rrmse en plain con mas anchura y budget moderado sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_bs264_hd192_l4_e300"
+    rationale: "per_class_equal+rrmse en plain con mas profundidad sobre anchor F7."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_plain_bs198_hd256_l4_e300"
+    rationale: "per_class_equal+rrmse en plain con combinacion fuerte de anchura y profundidad sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "baseline"
+      training.cycle_reals: false
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_bs198_e200"
+    rationale: "Chequeo run-level con per_class_equal+rrmse bajo regimen imbalance_aware y batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 198
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_bs264_e200"
+    rationale: "per_class_equal+rrmse en imbalance_aware con el anchor F7 de batch 264."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 264
+      training.num_epochs: 200
+      training.learning_rate: 0.0001
+      model.hidden_dim: 128
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_bs198_hd192_l3_e300"
+    rationale: "per_class_equal+rrmse en imbalance_aware con mayor anchura sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 3
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_bs264_hd192_l4_e300"
+    rationale: "per_class_equal+rrmse en imbalance_aware con mayor profundidad sobre batch 264."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 264
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 192
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true
+
+  - cfg_id: "pce_rrmse_aware_bs198_hd256_l4_e300"
+    rationale: "per_class_equal+rrmse en imbalance_aware con combinacion fuerte de capacidad sobre batch 198."
+    params:
+      training.loss_reduction: "per_class_equal"
+      training.regression_group_metric: "rrmse"
+      training.dataloader_mode: "balanced"
+      training.cycle_reals: true
+      training.batch_size: 198
+      training.num_epochs: 300
+      training.learning_rate: 0.0001
+      model.hidden_dim: 256
+      model.num_layers: 4
+      model.embedding_dim: 12
+    checks:
+      f7_balanced_cycling_compatible: true

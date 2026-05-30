@@ -1,0 +1,2 @@
+seed_set_id,panel_version,seed_index,seed_value,applies_to,note
+f7_seed_panel_pilot_v1,1,1,1234,"mlp|xgboost","Single-seed pilot panel derived from the canonical F7 panel."

@@ -1,0 +1,59 @@
+artifact_persistence_contract:
+  artifact_policy_id: "f7_artifact_persistence_contract_v1"
+  policy_version: 1
+  prediction_sidecar_schema_version: 1
+
+  must_persist_per_run:
+    - "results.yaml"
+    - "run_manifest.json"
+    - "metrics_long.csv"
+    - "config.yaml"
+    - "predictions_eval_raw.csv.gz"
+    - "interpretability_summary.json"
+    - "family_specific_interpretability_surface"
+    - "raw_metric_contract_validation"
+    - "meta_ids"
+
+  must_persist_per_shortlist:
+    - "interpretability_summary.json"
+    - "top_features_global.csv"
+    - "top_features_per_class.csv"
+
+  must_persist_per_finalist:
+    - "interpretability_summary.json"
+    - "top_features_global.csv"
+    - "top_features_per_class.csv"
+    - "family_specific_heavy_interpretability"
+
+  family_overrides:
+    mlp:
+      model_artifact_policy: "shortlist_or_finalist_only"
+    xgboost:
+      model_artifact_policy: "persist_every_run"
+
+  filename_policy:
+    legacy_default: "versioned_aliases"
+    new_f7_campaign_runs: "stable_single_copy"
+    single_copy_new_f7_campaign_runs: true
+    historical_reader_fallback_allowed: true
+    canonical_per_run_filenames:
+      results_yaml: "results.yaml"
+      run_manifest_json: "run_manifest.json"
+      metrics_long_csv: "metrics_long.csv"
+      config_snapshot: "config.yaml"
+
+  prediction_sidecar_policy:
+    filename: "predictions_eval_raw.csv.gz"
+    format: "csv_gzip"
+    persist_val_predictions_per_run: true
+    persist_test_predictions_per_run_when_test_enabled: true
+    persist_train_predictions_per_run: false
+    include_native_columns_when_available: true
+
+  interpretability_policy:
+    family_specific_implementation_pending: false
+    interpretability_summary_required_per_run: true
+    interpretability_summary_required_per_shortlist: true
+    interpretability_summary_required_per_finalist: true
+    family_specific_full_interpretability_per_run: true
+    interpretability_policy_status: "implemented_per_run_family_specific"

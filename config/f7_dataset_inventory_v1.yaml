@@ -1,0 +1,44 @@
+inventory:
+  inventory_id: "f7_dataset_inventory_v1"
+  split_id: "init_temporal_processed_v1"
+  status: "logical_inventory_frozen"
+  materialization_status: "pending_block_5_cap_alignment"
+  inventory_csv_path: "config/f7_dataset_inventory_v1.csv"
+
+policies:
+  naming_policy: "compositional_slug_v1"
+  materialization_policy: "eager_after_block_5_then_freeze"
+  mutation_policy: "immutable_versioned_inventory"
+  synthetic_dataset_policy: "fixed_dataset_per_policy_not_per_seed"
+
+mlp:
+  dataset_count: 96
+  x_base_values:
+    - "candidate_1"
+    - "candidate_2"
+    - "standard"
+    - "robust"
+    - "quantile"
+    - "minmax"
+  y_transform_values:
+    - "standard"
+    - "robust"
+    - "quantile"
+    - "minmax"
+  synthetic_policy_values:
+    - "none"
+    - "flowgen_official"
+    - "flowgen_train_only"
+    - "kmeans_smote"
+
+xgboost:
+  dataset_count: 4
+  dataset_name: "official_raw_xgb_base_v1"
+  feature_policy: "raw_numeric_plus_type_onehot"
+  x_transform: "raw"
+  y_transform: "raw"
+  synthetic_policy_values:
+    - "none"
+    - "flowgen_official"
+    - "flowgen_train_only"
+    - "kmeans_smote"

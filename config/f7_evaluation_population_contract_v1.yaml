@@ -1,0 +1,17 @@
+evaluation_population_contract:
+  contract_id: "f7_evaluation_population_contract_v1"
+  contract_version: 1
+  split_population_definition:
+    train:
+      role: "official_temporal_train_assignment"
+      exclusions_allowed: true
+    val:
+      role: "official_temporal_val_assignment"
+      exclusions_allowed: true
+    test:
+      role: "official_temporal_test_assignment"
+      exclusions_allowed: true
+  exclusion_policy:
+    exclusion_flags_supported: true
+    exclusion_reason_supported: true
+    post_split_exclusion_policy: "must_be_tracked_if_present"
