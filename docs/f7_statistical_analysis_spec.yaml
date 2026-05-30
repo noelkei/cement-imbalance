@@ -1,0 +1,441 @@
+analysis:
+  id: f7_statistical_analysis
+  version: v1_frozen_block14
+  status: frozen_for_block14
+  intent: "Machine-readable companion spec for the final F7 statistical analysis layer."
+  companion_documents:
+    narrative_plan: "docs/f7_statistical_analysis_plan.md"
+    structured_plan: "docs/f7_statistical_analysis_plan_structured.md"
+  source_of_truth_scope:
+    - "The narrative plan remains the broader conceptual source."
+    - "This YAML freezes structured requirements, defaults, and contracts for implementation."
+
+statistical_framing:
+  panel_assumptions:
+    iid: false
+    repeated_structure: true
+    paired_comparisons_preferred: true
+    seed_uncertainty_interpretation: "algorithmic_robustness_not_full_population_uncertainty"
+    temporal_vs_algorithmic_robustness_distinct: true
+  freeze_policy:
+    selection_surface: "val_pre_freeze"
+    final_descriptive_surfaces:
+      - val
+      - test
+    test_not_iterative: true
+    block14_frozen_interpretation:
+      val_governs_shortlist: true
+      val_and_test_coprimary_after_freeze: true
+
+research_questions:
+  - id: q1
+    text: "Which methodological axes improve predictive performance overall?"
+  - id: q2
+    text: "Which axes improve class-wise performance rather than only aggregate performance?"
+  - id: q3
+    text: "Which combinations show synergy or antagonism?"
+  - id: q4
+    text: "Which variants are robust across seeds?"
+  - id: q5
+    text: "Which variants generalize well across train, val, and test?"
+  - id: q6
+    text: "What are the main drivers, and how stable are they?"
+
+estimands:
+  marginal_effects:
+    targets:
+      - val_raw_real_macro_rrmse
+      - test_raw_real_macro_rrmse
+      - per_class_rrmse
+      - worst_class_rrmse
+      - simpson_risk_indicators
+  paired_contrasts:
+    description: "Average paired contrast under matched structural contexts."
+  split_gap_estimands:
+    - val_minus_train
+    - test_minus_train
+    - test_minus_val
+  interpretability_estimands:
+    - average_driver_importance
+    - average_driver_stability
+
+endpoints:
+  co_primary_predictive:
+    - val_raw_real_macro_rrmse
+    - test_raw_real_macro_rrmse
+  parallel_classwise_coprimary:
+    - per_class_rrmse
+    - worst_class_rrmse
+    - class_dispersion_rrmse
+    - simpson_gap_rrmse
+  secondary_predictive:
+    - raw_real_rmse
+    - raw_real_mse
+    - raw_real_r2
+    - raw_real_mape
+  diagnostic:
+    - val_minus_train
+    - test_minus_train
+    - test_minus_val
+    - training_runtime_s
+    - interpretability_runtime_s
+    - total_runtime_s
+
+performance_views_required:
+  - aggregate
+  - classwise
+  - worst_class
+  - split_gaps
+  - tails
+  - seed_robustness
+  - runtime_tradeoffs
+
+simpson_layer:
+  enabled: true
+  hypothesis: "Aggregate quality can hide poor class-wise behavior and cross-class interpolation."
+  required_measurements:
+    - macro_metrics
+    - per_class_metrics
+    - worst_class_metrics
+    - class_dispersion
+    - within_class_between_class_decomposition
+  derived_indicators:
+    - simpson_gap_rrmse
+    - class_dispersion_rrmse
+    - worst_class_penalty_rrmse
+
+uncertainty:
+  defaults:
+    aggregated_group_summaries: "bootstrap_over_seeds_or_smallest_defensible_repeated_unit"
+    paired_contrasts: "paired_bootstrap_default"
+    regression_models: "robust_standard_errors_default"
+    strong_dependence: "cluster_aware_uncertainty_when_appropriate"
+  required_outputs:
+    - mean
+    - ci95
+    - median
+    - iqr
+    - seed_spread
+    - min
+    - max
+    - p25
+    - p75
+  optional_risk_outputs:
+    - p90
+    - p95
+
+method_hierarchy:
+  primary_inferential_backbone:
+    - descriptive_multi_seed_summaries
+    - paired_or_blocked_comparisons
+    - mixed_effects_or_repeated_structure_regression
+  support_methods:
+    - anova_style_decomposition_on_fitted_models
+    - selective_posthoc_contrasts
+    - non_parametric_and_permutation_sensitivity_checks
+    - pareto_and_dominance_views
+  secondary_or_discouraged_as_main_argument:
+    - standalone_omnibus_anova
+    - all_vs_all_posthoc_tables
+    - purely_pvalue_driven_ranking
+    - sophistication_only_bayesian_hierarchy
+    - multivariate_omnibus_methods_that_hide_split_and_class_story
+
+effect_estimation:
+  main_factors:
+    - model_family
+    - x_transform
+    - y_transform
+    - synthetic_policy
+    - run_policy
+    - flowpre_usage
+    - flowgen_usage
+  important_interactions:
+    - model_family:synthetic_policy
+    - x_transform:y_transform
+    - x_transform:synthetic_policy
+    - x_transform:run_policy
+    - flowpre_usage:synthetic_policy
+    - model_family:run_policy
+  preferred_framework:
+    type: "mixed_effects_or_repeated_structure_regression"
+    seed_role: "blocking_or_random_effect_where_appropriate"
+    structural_group_explicit: true
+    endpoints:
+      - macro_endpoints
+      - classwise_endpoints
+      - simpson_risk_indicators
+      - split_gap_indicators
+
+anova_and_posthoc:
+  enabled: true
+  role: "support_layer_not_main_backbone"
+  anova_use_cases:
+    - factor_contribution_to_endpoint_variation
+    - selected_interaction_assessment
+    - structured_variance_decomposition
+  posthoc_requirements:
+    selective: true
+    structurally_motivated: true
+    paired_preferred: true
+    effect_size_required: true
+    uncertainty_required: true
+  multiplicity_control:
+    confirmatory_default: holm
+    exploratory_default: fdr
+    distinction_required:
+      - confirmatory
+      - secondary
+      - exploratory
+  minimum_confirmatory_families:
+    - synthetic_policy
+    - x_transform
+    - y_transform
+    - run_policy
+    - selected_interactions
+  model_family_role: "structured_comparison_not_all_vs_all"
+
+pairwise_comparison_layer:
+  enabled: true
+  use_when: "Variants differ in one factor while sharing the rest of the structural context."
+  required_outputs:
+    - mean_delta
+    - median_delta
+    - ci95_delta
+    - win_rate
+    - fraction_of_seeds_where_a_beats_b
+    - fraction_of_structural_groups_where_a_beats_b
+  practical_decision_views:
+    - superiority
+    - non_inferiority
+    - operationally_irrelevant_difference
+  methods:
+    - paired_bootstrap
+    - paired_permutation_test
+    - paired_wilcoxon_if_needed
+
+risk_and_tail_analysis:
+  required:
+    - worst_class_behavior
+    - worst_quantile_behavior
+    - p90
+    - p95
+    - per_class_high_quantiles
+    - seed_wise_worst_case_summaries
+
+interpretability:
+  enabled: true
+  primary_cross_family_surface: semantic_bridge_perturbation
+  auxiliary_surfaces:
+    - xgb_native_shap
+    - mlp_flowpre_native_latent_perturbation
+  topk_default: 10
+  required_statistics:
+    - mean_importance
+    - std_importance
+    - stderr_importance
+    - mean_rank
+    - topk_frequency
+    - cross_seed_stability
+  stability_layer:
+    - rank_correlation
+    - topk_intersection
+    - semantic_driver_family_stability
+    - null_or_weak_reference_context
+
+required_plots:
+  predictive_performance:
+    - grouped_forest_mean_ci
+    - rank_plots_with_uncertainty
+    - split_gap_plots
+    - macro_vs_worst_class_scatter
+    - macro_vs_class_dispersion_scatter
+    - cost_quality_frontier
+  factor_effects:
+    - coefficient_plots_main_effects
+    - coefficient_plots_selected_interactions
+    - interaction_heatmaps
+  simpson_focused:
+    - overall_vs_macro
+    - macro_vs_worst_class
+    - per_class_error_profiles
+    - class_dispersion_distributions
+  tail_robustness:
+    - p90_p95_comparison
+    - seed_spread_boxplots
+    - worst_case_seed_plots
+  interpretability:
+    - top_feature_stability_bars
+    - rank_correlation_distributions
+    - cross_family_driver_overlap
+    - feature_importance_heatmaps
+
+reproducibility_artifacts:
+  analysis_manifest:
+    required_fields:
+      - campaigns_included
+      - lineage_root_used
+      - panel_version
+      - endpoints_analyzed
+      - derived_variables
+      - confirmatory_contrasts
+      - bootstrap_settings
+      - model_formulas
+      - plot_set
+  contrast_registry:
+    required_fields:
+      - confirmatory_contrasts
+      - secondary_contrasts
+      - exploratory_contrasts
+      - endpoint_family
+      - structural_pairing_rule
+      - multiplicity_rule
+      - reporting_role
+
+canonical_data_products:
+  - per_run_panel
+  - structural_group_aggregate_panel
+  - pairwise_contrast_panel
+  - interpretability_aggregate_panel
+  - analysis_manifest_and_contrast_registry
+
+upstream_prerequisites:
+  blocking:
+    - official_split_contract
+    - raw_space_comparability_contract
+    - class_resolved_metric_surface
+    - lineage_and_seed_structure
+    - canonical_artifact_discoverability
+    - validity_and_closure_state
+  high_value_but_not_always_blocking:
+    - runtime_surface
+    - warning_surface
+    - auxiliary_interpretability_surfaces
+    - parser_and_build_provenance
+  should_exist_if_absent:
+    - canonical_class_ontology_manifest
+    - metric_availability_manifest
+    - structural_factor_parser_contract
+    - expected_replication_manifest
+    - analysis_ready_split_comparability_marker
+    - split_class_support_surface
+    - raw_target_definition_and_unit_contract
+    - prediction_row_join_contract
+    - feature_schema_contract_for_interpretability
+    - metric_aggregation_and_weighting_contract
+    - evaluation_population_and_exclusion_contract
+
+campaign_derived_requirements:
+  run_identifiers:
+    - campaign_id
+    - campaign_lineage_id
+    - root_campaign_id
+    - parent_campaign_id
+    - trial_id
+    - run_id
+    - lineage_trial_group_id
+    - comparison_group_id
+    - seed
+    - replication_index
+  factor_metadata:
+    - model_family
+    - dataset_candidate_id
+    - run_spec_id
+    - base_config_id
+    - objective_metric_id
+    - run_mode
+    - allow_test_holdout
+    - test_enabled
+    - x_transform
+    - y_transform
+    - synthetic_policy
+    - run_policy
+    - flowpre_usage
+    - flowgen_usage
+  comparability_metadata:
+    - contract_id
+    - raw_metric_contract_id
+    - raw_metric_contract_validation_status
+    - raw_real_available
+    - requires_raw_inversion
+    - raw_inversion_status
+    - value_space_default
+    - variant_fingerprint
+  artifact_paths:
+    - run_manifest_path
+    - results_path
+    - metrics_long_path
+    - prediction_sidecar_path
+    - interpretability_summary_path
+  runtime_metadata:
+    - training_runtime_s
+    - interpretability_runtime_s
+    - total_runtime_s
+  warning_and_execution_metadata:
+    - execution_status
+    - campaign_valid
+    - campaign_valid_interpretability
+    - campaign_valid_f7
+    - warning_count_total
+    - warning_count_silenced_known_noise
+    - warning_count_surfaced
+    - warning_policy_counts
+    - warning_signature_counts
+  split_and_class_surface:
+    - train_metrics_available
+    - val_metrics_available
+    - test_metrics_available
+    - per_class_metric_support
+    - worst_class_support
+  lineage_pooling_metadata:
+    - lineage_pool_ready
+    - lineage_pool_blockers
+    - expected_seed_count
+    - observed_seed_count
+    - seed_completeness_ratio
+  provenance_metadata:
+    - factor_parser_version
+    - lineage_aggregate_build_version
+    - panel_build_timestamp
+
+derived_variables:
+  required:
+    - test_minus_val
+    - val_minus_train
+    - test_minus_train
+    - simpson_gap_rrmse
+    - class_dispersion_rrmse
+    - worst_class_penalty_rrmse
+  optional_for_secondary_metrics: true
+
+practical_decision_logic:
+  axes:
+    - aggregate_quality
+    - simpson_safe_quality
+    - operational_robustness
+  minimum_practical_effect_rrmse: TBD_before_final_reporting
+
+statistical_guardrails:
+  - "Do not treat the panel as i.i.d."
+  - "Prefer paired comparisons where the design allows."
+  - "Do not let R2 dominate the Simpson narrative."
+  - "Do not rely on omnibus ANOVA alone."
+  - "Do not reduce the inferential layer to p-value tables."
+  - "Do not mix incomparable runs silently."
+  - "Do not conflate algorithmic robustness with temporal robustness."
+
+implementation_requirements:
+  - paired_comparison_scaffolding
+  - bootstrap_ready_panels
+  - lineage_aware_aggregate_panels
+  - classwise_metric_availability
+  - interpretability_surfaces_with_stable_feature_identities
+  - analysis_manifests_and_registries
+  - reproducible_plot_generation_from_canonical_panels
+
+deferred_decisions:
+  explicitly_deferred:
+    - analysis_population_policy
+    - missing_data_policy
+    - final_inclusion_exclusion_rules_for_incomplete_groups
+  note: "These are intentionally deferred and should be decided later on top of this contract layer."

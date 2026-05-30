@@ -13,6 +13,7 @@ __pycache__/
 
 # Local/private config overlays
 /config/local/
+/config/generated/
 
 # Local-only data and generated artifacts
 /data/raw/
